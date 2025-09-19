@@ -1,14 +1,18 @@
-# -------------------------------------------------
-# Requisitos (ponlos en requirements.txt del repo):
-# streamlit, pandas, numpy, plotly, statsmodels, openpyxl, pillow
+# app.py.py — AseguraView · Ciudades & Ramos (Excel)
+# ---------------------------------------------------
+# Funciona con este nombre de archivo (app.py.py) en Streamlit Cloud
+# siempre que el "Main file path" esté configurado a app.py.py.
+# Además carga automáticamente SECTOR SEGUROS.xlsx si no subes archivo.
 
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.express as px
-from statsmodels.tsa.arima.model import ARIMA
+import os
+import io
+import base64
 from PIL import Image
-import base64, io
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+from statsmodels.tsa.arima.model import ARIMA
 
 # =========================
 # Configuración inicial
@@ -23,10 +27,6 @@ st.set_page_config(
 # Fondo dinámico (preview)
 # =========================
 def css_background_image(data_url: str, blur_px: int = 2, darken: float = 0.35) -> str:
-    """
-    Crea CSS para poner un background full-page con ::before, blur y oscurecimiento.
-    data_url: 'url("...")' o 'url(data:image/...)'
-    """
     return f"""
     <style>
       .stApp {{
@@ -57,7 +57,6 @@ def css_background_image(data_url: str, blur_px: int = 2, darken: float = 0.35) 
     """
 
 def css_background_animated() -> str:
-    """Gradiente animado tech (fallback si no hay imagen)."""
     return """
     <style>
       .stApp {
@@ -90,7 +89,6 @@ def css_background_animated() -> str:
     """
 
 def file_to_data_url(file) -> str:
-    """Convierte archivo binario de imagen a data URL base64 (JPEG)."""
     img = Image.open(file).convert("RGB")
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=92)
@@ -113,7 +111,6 @@ with st.sidebar:
         if url.strip():
             bg_css = css_background_image(f'url("{url.strip()}")', blur_px=2, darken=0.35)
 
-# Inyecta CSS del fondo
 if bg_mode == "Animado (gradiente)" or not bg_css:
     st.markdown(css_background_animated(), unsafe_allow_html=True)
 else:
@@ -139,16 +136,13 @@ COL_PATTERNS = {
 }
 
 def parse_num_co(x):
-    """Formatea números con miles '.' y decimales ',' comunes en CO."""
     if pd.isna(x):
         return np.nan
     s = str(x).strip().replace(" ", "")
-    # Si ya es convertible directo:
     try:
         return float(s)
     except Exception:
         pass
-    # Quita miles y convierte decimal
     s = s.replace(".", "").replace(",", ".")
     try:
         return float(s)
@@ -156,7 +150,6 @@ def parse_num_co(x):
         return np.nan
 
 def match_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Mapea columnas 'parecidas' a las esperadas."""
     cols_lower = [c.strip().lower() for c in df.columns]
     mapping = {}
     for target, pats in COL_PATTERNS.items():
@@ -173,7 +166,6 @@ def match_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_data(file) -> pd.DataFrame:
-    """Lee Excel, ajusta encabezados, parsea número/fecha y limpia nulos."""
     df = pd.read_excel(file, engine="openpyxl")
     try:
         if set(EXPECTED).issubset(set(df.columns)):
@@ -189,7 +181,6 @@ def load_data(file) -> pd.DataFrame:
     return df
 
 def ensure_monthly_series(df_sel: pd.DataFrame) -> pd.DataFrame:
-    """Asegura frecuencia mensual (MS) y rellena meses faltantes con 0."""
     if df_sel.empty:
         return df_sel
     s = df_sel.set_index('FECHA')['Suma de VALOR'].sort_index()
@@ -198,7 +189,6 @@ def ensure_monthly_series(df_sel: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame({'FECHA': s.index, 'Suma de VALOR': s.values})
 
 def arima_forecast(series_df: pd.DataFrame, steps: int = 6):
-    """ARIMA(1,1,1) baseline con bandas al 95%."""
     if series_df.shape[0] < 6 or steps <= 0:
         return None
     x = series_df.set_index('FECHA')['Suma de VALOR']
@@ -212,23 +202,32 @@ def arima_forecast(series_df: pd.DataFrame, steps: int = 6):
     return pd.DataFrame({'FECHA': idx, 'Forecast': fc.predicted_mean.values, 'lo95': lo, 'hi95': hi})
 
 def money(x: float) -> str:
-    """Formato pesos con puntos de miles."""
     return "$" + f"{x:,.0f}".replace(",", ".")
 
 # =========================
-# Carga de datos
+# Carga de datos (subir o fallback archivo repo)
 # =========================
 with st.sidebar:
     st.header("Datos")
-    excel_file = st.file_uploader("Excel (.xlsx)", type=["xlsx"])
+    excel_upload = st.file_uploader("Excel (.xlsx)", type=["xlsx"])
+    st.caption("Si no subes archivo, intento cargar **SECTOR SEGUROS.xlsx** del repositorio.")
 
-if not excel_file:
-    st.warning("Sube el Excel con columnas: " + ", ".join(EXPECTED))
-    st.stop()
+df = None
+if excel_upload is not None:
+    df = load_data(excel_upload)
+else:
+    # Fallback: intenta cargar archivo del repo
+    fallback_path = os.environ.get("DEFAULT_EXCEL", "SECTOR SEGUROS.xlsx")
+    if os.path.exists(fallback_path):
+        try:
+            df = load_data(fallback_path)
+            st.info(f"Usando archivo del repo: {fallback_path}")
+        except Exception as e:
+            st.error(f"No se pudo leer el archivo del repo: {e}")
+    else:
+        st.warning("Sube un Excel o agrega 'SECTOR SEGUROS.xlsx' al repositorio para probar.")
 
-df = load_data(excel_file)
 if df is None or df.empty:
-    st.error("No fue posible cargar datos válidos.")
     st.stop()
 
 # =========================
@@ -300,7 +299,6 @@ if df_monthly.shape[0] >= 6:
         fig.add_scatter(x=fc['FECHA'], y=fc['Forecast'], mode='lines', name='Forecast', line=dict(dash='dot'))
         fig.add_scatter(x=fc['FECHA'], y=fc['lo95'], mode='lines', name='IC 95% Low', line=dict(width=0), showlegend=False)
         fig.add_scatter(x=fc['FECHA'], y=fc['hi95'], mode='lines', name='IC 95% High', line=dict(width=0), showlegend=False)
-        # Área entre bandas (ligero)
         area = px.area(fc, x='FECHA', y=['lo95','hi95']).update_traces(opacity=0.12, showlegend=False).data
         fig.add_traces(area)
     st.plotly_chart(fig, use_container_width=True)
