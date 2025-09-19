@@ -1,9 +1,3 @@
-# app.py.py — AseguraView · Ciudades & Ramos (Excel)
-# ---------------------------------------------------
-# Funciona con este nombre de archivo (app.py.py) en Streamlit Cloud
-# siempre que el "Main file path" esté configurado a app.py.py.
-# Además carga automáticamente SECTOR SEGUROS.xlsx si no subes archivo.
-
 import os
 import io
 import base64
