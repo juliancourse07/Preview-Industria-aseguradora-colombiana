@@ -1,4 +1,3 @@
-# app.py  — AseguraView · Ciudades & Ramos (Excel)
 # -------------------------------------------------
 # Requisitos (ponlos en requirements.txt del repo):
 # streamlit, pandas, numpy, plotly, statsmodels, openpyxl, pillow
