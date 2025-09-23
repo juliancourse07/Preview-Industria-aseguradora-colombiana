@@ -4,7 +4,6 @@ import numpy as np
 import plotly.express as px
 from statsmodels.tsa.arima.model import ARIMA
 from datetime import datetime
-import requests
 
 st.set_page_config(
     page_title="AseguraView · Ciudades & Ramos",
@@ -172,12 +171,23 @@ with st.container():
         fig.add_scatter(x=fc_df['FECHA'], y=fc_df['Forecast'], fill='tozeroy', name='Proy. Sombra', opacity=0.2, line=dict(color="blue"), showlegend=False)
     st.plotly_chart(fig, use_container_width=True)
 
+    # --- TABLA DE PROYECCIÓN ROBUSTA ---
     with st.expander("Ver tabla de proyección"):
-        df_proj = pd.concat([
-            df_sel[['FECHA','ACUM_ANUAL']].set_index('FECHA'),
-            fc_df.set_index('FECHA').rename(columns={'Forecast':'ACUM_ANUAL'})
-        ]).sort_index()
-        st.dataframe(df_proj, use_container_width=True)
+        # Concatenar histórico y forecast en una sola tabla clara
+        hist = df_sel[['FECHA','ACUM_ANUAL']].copy()
+        hist['Tipo'] = "Histórico"
+        if not fc_df.empty:
+            fc_tabla = fc_df.copy()
+            fc_tabla = fc_tabla.rename(columns={'Forecast':'ACUM_ANUAL'})
+            fc_tabla['Tipo'] = "Proyección"
+            # Elimina cualquier fecha que ya esté en histórico para evitar duplicados
+            fc_tabla = fc_tabla[~fc_tabla['FECHA'].isin(hist['FECHA'])]
+            proy_tabla = pd.concat([hist, fc_tabla], axis=0).sort_values('FECHA').reset_index(drop=True)
+        else:
+            proy_tabla = hist
+        # Ordena las columnas para mayor claridad
+        proy_tabla = proy_tabla[['FECHA', 'ACUM_ANUAL', 'Tipo']]
+        st.dataframe(proy_tabla, use_container_width=True)
 
 # --- Radar y mapa de siniestralidad (Heatmap) ---
 st.header("Radar y Mapa de Siniestralidad por Ciudad")
