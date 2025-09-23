@@ -23,7 +23,7 @@ st.markdown(
 )
 
 st.title("AseguraView · Ciudades & Ramos")
-st.caption("Dashboard interactivo con forecast ajustado y análisis espacial de siniestralidad.")
+st.caption("Dashboard interactivo con forecast ajustado, análisis espacial y comentarios automáticos tipo BI.")
 
 # --- Lee de Google Sheets directo ---
 SHEET_ID = "1ThVwW3IbkL7Dw_Vrs9heT1QMiHDZw1Aj-n0XNbDi9i8"
@@ -90,6 +90,45 @@ def load_data():
     df = df.dropna(subset=['FECHA','Suma de VALOR'])
     return df
 
+# --- Análisis BI automático con reglas Python ---
+def resumen_analitico_proyeccion(hist, proy):
+    if proy is None or proy.empty:
+        return "No hay suficiente información para análisis de proyección."
+    # Crecimiento último mes
+    if len(hist) >= 2:
+        ult = hist['Suma de VALOR'].iloc[-1]
+        ant = hist['Suma de VALOR'].iloc[-2]
+        crec = (ult-ant)/abs(ant) if ant != 0 else None
+    else:
+        crec = None
+    tendencia = "alza" if crec and crec>0.05 else ("baja" if crec and crec<-0.05 else "estable")
+    proy_max = proy['ACUM_ANUAL'].max() if not proy.empty else 0
+    texto = (
+        f"La proyección estima un cierre de {proy_max:,.0f}. "
+        f"La tendencia reciente es {tendencia}. "
+        f"Se recomienda monitorear la evolución mensual para ajustar estrategias."
+    )
+    if tendencia == "alza":
+        texto += " Existe un riesgo de incremento en el valor futuro, revise causas y prepare estrategias."
+    if tendencia == "baja":
+        texto += " El comportamiento indica una posible reducción, identifique oportunidades de mejora."
+    return texto
+
+def resumen_analitico_espacial(df, tipo_analisis):
+    if df.empty:
+        return "No hay datos para analizar en la selección actual."
+    c = df.groupby('CIUDAD')['Suma de VALOR'].sum().sort_values(ascending=False)
+    top = c.head(3)
+    total = c.sum()
+    tipo = "siniestros" if "siniestro" in tipo_analisis.lower() else "primas"
+    tendencia = "concentrada" if top.values[0] > 0.3*total else "dispersa"
+    mayor = top.idxmax()
+    return (
+        f"El análisis espacial para {tipo} muestra que la mayor concentración está en {mayor} "
+        f"({top.iloc[0]:,.0f}) representando el {top.iloc[0]/total:.1%} del total. "
+        f"La distribución es {tendencia}, con las siguientes ciudades destacadas: {', '.join([f'{k} ({v:,.0f})' for k,v in top.items()])}."
+    )
+
 df = load_data()
 
 # --- Filtros sidebar (agrega opción "Todas") ---
@@ -113,98 +152,120 @@ if ramo != "Todas":
     filt &= (df['RAMOS'] == ramo)
 df_sel = df[filt].sort_values("FECHA").copy()
 
-# --- Selección de año y mes objetivo, máximo 12 meses adelante ---
-min_date = df_sel['FECHA'].min()
-max_date = df_sel['FECHA'].max()
-años = list(range(min_date.year, max_date.year+2))
-anio = st.sidebar.selectbox("Año objetivo", años, index=len(años)-2)
-meses = list(range(1, 13))
-mes_obj = st.sidebar.selectbox("Mes objetivo", meses, index=max_date.month-1)
-
-# Calcular horizonte de forecast
-periodo_obj = datetime(anio, mes_obj, 1)
-ult_fecha = df_sel['FECHA'].max()
-horizonte = (periodo_obj.year - ult_fecha.year)*12 + (periodo_obj.month - ult_fecha.month)
-if horizonte < 0:
-    st.warning("No puedes proyectar a una fecha anterior al último dato.")
-    st.stop()
-elif horizonte == 0:
-    proy_meses = 0
-else:
-    proy_meses = min(12, horizonte)
+# --- Selección de meses a proyectar ---
+st.sidebar.markdown("---")
+max_periodos = 24
+st.sidebar.markdown(f"Máximo periodos proyectables: {max_periodos}")
+periodos_forecast = st.sidebar.number_input(
+    "¿Cuántos meses adelante quieres proyectar?",
+    min_value=1,
+    max_value=max_periodos,
+    value=6,
+    step=1
+)
 
 # --- Serie acumulada por año ---
 df_sel['AÑO'] = df_sel['FECHA'].dt.year
 df_sel['MES'] = df_sel['FECHA'].dt.month
 df_sel['ACUM_ANUAL'] = df_sel.groupby(['AÑO'])['Suma de VALOR'].cumsum()
 
-# --- Forecast ARIMA (acumulado) ---
+# --- Forecast ARIMA (mensual y acumulado) ---
 with st.container():
     st.subheader("Proyección personalizada")
-    ytd = df_sel[df_sel['FECHA'].dt.year == anio]['Suma de VALOR'].sum()
-    proy = 0
-    cierre_estimado = ytd
+    ytd = df_sel[df_sel['FECHA'].dt.year == df_sel['FECHA'].max().year]['Suma de VALOR'].sum()
+    proy, cierre_estimado = 0, ytd
 
-    if len(df_sel) >= 6 and proy_meses > 0:
+    if len(df_sel) >= 6 and periodos_forecast > 0:
         ts = df_sel.set_index('FECHA')['Suma de VALOR'].asfreq('MS').fillna(0)
         ts_acum = ts.groupby(ts.index.year).cumsum()
-        modelo = ARIMA(ts_acum, order=(1,1,1))
+        modelo = ARIMA(ts, order=(1,1,1))
         ajuste = modelo.fit()
-        fc = ajuste.get_forecast(steps=proy_meses)
-        forecast_index = pd.date_range(ts_acum.index.max() + pd.offsets.MonthBegin(), periods=proy_meses, freq='MS')
-        proy_vals = fc.predicted_mean.values
-        proy = proy_vals[-1] if len(proy_vals) else 0
-        cierre_estimado = ytd + proy
-        fc_df = pd.DataFrame({'FECHA': forecast_index, 'Forecast': proy_vals})
+        fc = ajuste.get_forecast(steps=periodos_forecast)
+        forecast_index = pd.date_range(ts.index.max() + pd.offsets.MonthBegin(), periods=periodos_forecast, freq='MS')
+        forecast_vals = fc.predicted_mean.values
+        forecast_ci = fc.conf_int(alpha=0.05).values
+
+        last_acum = ts_acum.iloc[-1]
+        forecast_acum = np.cumsum(forecast_vals) + last_acum
+
+        fc_df = pd.DataFrame({
+            'FECHA': forecast_index,
+            'Forecast_mensual': forecast_vals,
+            'Forecast_acum': forecast_acum,
+            'IC_lo': forecast_ci[:,0],
+            'IC_hi': forecast_ci[:,1]
+        })
+        proy = forecast_acum[-1] - last_acum
+        cierre_estimado = last_acum + proy
     else:
         fc_df = pd.DataFrame()
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric(f"YTD {anio}", f"${ytd:,.0f}".replace(",", "."))
-    col2.metric(f"Proyección hasta {anio}-{mes_obj:02d}", f"${proy:,.0f}".replace(",", "."))
-    col3.metric(f"Total Estimado {anio}-{mes_obj:02d}", f"${cierre_estimado:,.0f}".replace(",", "."))
+    # --- Análisis automático de proyección ---
+    with st.container():
+        st.markdown("#### Análisis automático de la proyección")
+        hist = df_sel[['FECHA','Suma de VALOR','ACUM_ANUAL']].copy()
+        analisis = resumen_analitico_proyeccion(hist, fc_df if not fc_df.empty else None)
+        st.info(analisis)
 
-    # --- Serie histórica y forecast (acumulado) ---
-    fig = px.line(df_sel, x='FECHA', y='ACUM_ANUAL', title="Histórico Acumulado y Proyección")
+    col1, col2, col3 = st.columns(3)
+    col1.metric(f"YTD {df_sel['FECHA'].max().year}", f"${ytd:,.0f}".replace(",", "."))
+    col2.metric(f"Proyección {periodos_forecast} meses", f"${proy:,.0f}".replace(",", "."))
+    col3.metric(f"Total Estimado (+proy)", f"${cierre_estimado:,.0f}".replace(",", "."))
+
+    # --- Serie histórica y forecast (mensual y acumulado) ---
+    fig = px.line(df_sel, x='FECHA', y='ACUM_ANUAL', title="Acumulado histórico y proyección", labels={'ACUM_ANUAL': 'Acumulado'})
     if not fc_df.empty:
-        fig.add_scatter(x=fc_df['FECHA'], y=fc_df['Forecast'], mode='lines+markers', name='Forecast', line=dict(dash='dot'))
-        fig.add_scatter(x=fc_df['FECHA'], y=fc_df['Forecast'], fill='tozeroy', name='Proy. Sombra', opacity=0.2, line=dict(color="blue"), showlegend=False)
+        fig.add_scatter(x=fc_df['FECHA'], y=fc_df['Forecast_acum'], mode='lines+markers', name='Forecast (acum)', line=dict(dash='dot', color='blue'))
+        fig.add_scatter(x=fc_df['FECHA'], y=fc_df['Forecast_acum'], fill='tozeroy', name='Proy. Sombra', opacity=0.2, line=dict(color="blue"), showlegend=False)
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- TABLA DE PROYECCIÓN ROBUSTA ---
+    fig2 = px.line(df_sel, x='FECHA', y='Suma de VALOR', title="Histórico mensual y Proyección", labels={'Suma de VALOR': 'Mensual'})
+    if not fc_df.empty:
+        fig2.add_scatter(x=fc_df['FECHA'], y=fc_df['Forecast_mensual'], mode='lines+markers', name='Forecast (mensual)', line=dict(dash='dot', color='orange'))
+        fig2.add_traces([
+            px.scatter(x=fc_df['FECHA'], y=fc_df['IC_lo'], mode='lines', name="IC 95% Lower").data[0],
+            px.scatter(x=fc_df['FECHA'], y=fc_df['IC_hi'], mode='lines', name="IC 95% Upper").data[0],
+        ])
+    st.plotly_chart(fig2, use_container_width=True)
+
+    # --- TABLA DE PROYECCIÓN CLARA ---
     with st.expander("Ver tabla de proyección"):
-        # Concatenar histórico y forecast en una sola tabla clara
-        hist = df_sel[['FECHA','ACUM_ANUAL']].copy()
+        hist = df_sel[['FECHA','Suma de VALOR','ACUM_ANUAL']].copy()
         hist['Tipo'] = "Histórico"
         if not fc_df.empty:
             fc_tabla = fc_df.copy()
-            fc_tabla = fc_tabla.rename(columns={'Forecast':'ACUM_ANUAL'})
+            fc_tabla = fc_tabla.rename(columns={'Forecast_mensual':'Suma de VALOR', 'Forecast_acum':'ACUM_ANUAL'})
             fc_tabla['Tipo'] = "Proyección"
-            # Elimina cualquier fecha que ya esté en histórico para evitar duplicados
             fc_tabla = fc_tabla[~fc_tabla['FECHA'].isin(hist['FECHA'])]
-            proy_tabla = pd.concat([hist, fc_tabla], axis=0).sort_values('FECHA').reset_index(drop=True)
+            proy_tabla = pd.concat([hist, fc_tabla[['FECHA','Suma de VALOR','ACUM_ANUAL','Tipo']]], axis=0).sort_values('FECHA').reset_index(drop=True)
         else:
             proy_tabla = hist
-        # Ordena las columnas para mayor claridad
-        proy_tabla = proy_tabla[['FECHA', 'ACUM_ANUAL', 'Tipo']]
         st.dataframe(proy_tabla, use_container_width=True)
 
 # --- Radar y mapa de siniestralidad (Heatmap) ---
 st.header("Radar y Mapa de Siniestralidad por Ciudad")
 if st.button("Ver análisis espacial"):
-    df_sini = df[df['Primas/Siniestros'] == "Siniestros"].copy()
-    df_sini['lat'] = df_sini['CIUDAD'].str.upper().map(lambda c: city_coords.get(c, (None, None))[0])
-    df_sini['lon'] = df_sini['CIUDAD'].str.upper().map(lambda c: city_coords.get(c, (None, None))[1])
-    df_sini = df_sini.dropna(subset=['lat','lon'])
+    df_esp = df[df['Primas/Siniestros'].str.lower().str.contains(tipo.lower())].copy()
+    df_esp['lat'] = df_esp['CIUDAD'].str.upper().map(lambda c: city_coords.get(c, (None, None))[0])
+    df_esp['lon'] = df_esp['CIUDAD'].str.upper().map(lambda c: city_coords.get(c, (None, None))[1])
+    df_esp = df_esp.dropna(subset=['lat','lon'])
+
+    # --- Análisis automático espacial ---
+    with st.container():
+        st.markdown("#### Análisis automático espacial")
+        analisis_espacial = resumen_analitico_espacial(df_esp, tipo)
+        st.info(analisis_espacial)
+
     # Radar plot
-    top_cities = df_sini.groupby('CIUDAD')['Suma de VALOR'].sum().sort_values(ascending=False).head(10)
-    radar_fig = px.line_polar(r=top_cities.values, theta=top_cities.index, line_close=True, title="Radar de Siniestros por Ciudad")
+    top_cities = df_esp.groupby('CIUDAD')['Suma de VALOR'].sum().sort_values(ascending=False).head(10)
+    radar_fig = px.line_polar(r=top_cities.values, theta=top_cities.index, line_close=True, title=f"Radar de {tipo} por Ciudad")
     st.plotly_chart(radar_fig, use_container_width=True)
-    # Mapa de calor (heatmap)
+    # Heatmap PRO: usa smoother y paleta mejor
     fig_map = px.density_mapbox(
-        df_sini, lat='lat', lon='lon', z='Suma de VALOR', radius=30,
-        center=dict(lat=4.5, lon=-74), zoom=4.5, mapbox_style="carto-positron",
-        title="Mapa de siniestralidad (heatmap Colombia)"
+        df_esp, lat='lat', lon='lon', z='Suma de VALOR', radius=45,
+        center=dict(lat=4.5, lon=-74), zoom=4.5, mapbox_style="carto-darkmatter",
+        color_continuous_scale='Turbo', opacity=0.7,
+        title=f"Mapa de {tipo} (heatmap Colombia, suavizado)"
     )
     st.plotly_chart(fig_map, use_container_width=True)
 
