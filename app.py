@@ -102,7 +102,13 @@ def resumen_analitico_proyeccion(hist, proy):
     else:
         crec = None
     tendencia = "alza" if crec and crec>0.05 else ("baja" if crec and crec<-0.05 else "estable")
-    proy_max = proy['ACUM_ANUAL'].max() if not proy.empty else 0
+    # Busca columna forecast acumulada o ACUM_ANUAL
+    if "ACUM_ANUAL" in proy.columns:
+        proy_max = proy['ACUM_ANUAL'].max()
+    elif "Forecast_acum" in proy.columns:
+        proy_max = proy['Forecast_acum'].max()
+    else:
+        proy_max = 0
     texto = (
         f"La proyección estima un cierre de {proy_max:,.0f}. "
         f"La tendencia reciente es {tendencia}. "
