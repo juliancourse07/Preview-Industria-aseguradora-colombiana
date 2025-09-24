@@ -7,4 +7,3 @@ openpyxl
 pillow
 xlrd
 pyarrow
-
