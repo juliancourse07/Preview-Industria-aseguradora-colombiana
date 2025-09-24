@@ -2,8 +2,10 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+from plotly.graph_objs import Figure
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.arima.model import ARIMA
+from io import BytesIO
 from datetime import datetime
 import warnings
 
@@ -28,11 +30,10 @@ st.markdown(
 )
 
 st.title("AseguraView · Primas & Presupuesto")
-st.caption("Forecast mensual (no acumulado), cierre estimado y presupuesto 2026 por Año / Sucursal / Línea / Compañía.")
+st.caption("Forecast mensual, cierre estimado 2025 y presupuesto sugerido 2026 por Año / Sucursal / Línea / Compañía.")
 
 # =================== FUENTE ===================
-# Si cambias la base, actualiza estos dos:
-SHEET_ID = "1ThVwW3IbkL7Dw_Vrs9heT1QMiHDZw1Aj-n0XNbDi9i8"
+SHEET_ID = "1ThVwW3IbkL7Dw_Vrs9heT1QMiHDZw1Aj-n0XNbDi9i8"  # actualízalo si cambia
 SHEET_NAME_DATOS = "Hoja1"
 
 def gsheet_csv(sheet_id, sheet_name):
@@ -40,14 +41,12 @@ def gsheet_csv(sheet_id, sheet_name):
 
 # =================== UTILIDADES ===================
 def parse_number_co(series: pd.Series) -> pd.Series:
-    """Convierte '648.306.977,2' -> 648306977.2 y limpia otros formatos."""
     s = series.astype(str)
     s = s.str.replace(r"[^\d,.\-]", "", regex=True)
     s = s.str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
     return pd.to_numeric(s, errors="coerce")
 
 def ensure_monthly(ts: pd.Series) -> pd.Series:
-    """Asegura índice mensual MS y completa con interpolación (no ceros)."""
     ts = ts.asfreq("MS")
     return ts.interpolate("linear").fillna(method="bfill").fillna(method="ffill")
 
@@ -57,35 +56,25 @@ def smape(y_true, y_pred):
     return np.mean(2.0 * np.abs(y_pred - y_true) / (np.abs(y_true) + np.abs(y_pred) + 1e-9)) * 100
 
 def fit_forecast(ts_m: pd.Series, steps: int, eval_months:int=6):
-    """
-    Modela con SARIMAX(1,1,1)(1,1,1,12) en log1p.
-    Devuelve (hist_df, fc_df, smape_val).
-    - hist_df: FECHA, Mensual, ACUM
-    - fc_df: FECHA, Forecast_mensual, Forecast_acum, IC_lo, IC_hi
-    """
     ts = ensure_monthly(ts_m.copy())
     y = np.log1p(ts)
 
-    # Validación temporal (walk-forward corto)
     smapes = []
     start = max(len(y) - eval_months, 12)
     if len(y) >= start + 1:
         for t in range(start, len(y)):
-            y_train = y.iloc[:t]
-            y_test = y.iloc[t:t+1]
+            y_tr = y.iloc[:t]; y_te = y.iloc[t:t+1]
             try:
-                m = SARIMAX(y_train, order=(1,1,1), seasonal_order=(1,1,1,12),
+                m = SARIMAX(y_tr, order=(1,1,1), seasonal_order=(1,1,1,12),
                             enforce_stationarity=False, enforce_invertibility=False)
                 r = m.fit(disp=False)
                 p = r.get_forecast(steps=1).predicted_mean
-                smapes.append(smape(np.expm1(y_test.values), np.expm1(p.values)))
             except Exception:
-                r = ARIMA(y_train, order=(1,1,1)).fit()
+                r = ARIMA(y_tr, order=(1,1,1)).fit()
                 p = r.get_forecast(steps=1).predicted_mean
-                smapes.append(smape(np.expm1(y_test.values), np.expm1(p.values)))
+            smapes.append(smape(np.expm1(y_te.values), np.expm1(p.values)))
     smape_last = np.mean(smapes) if smapes else np.nan
 
-    # Entrena completo y proyecta
     try:
         m_full = SARIMAX(y, order=(1,1,1), seasonal_order=(1,1,1,12),
                          enforce_stationarity=False, enforce_invertibility=False)
@@ -113,13 +102,31 @@ def fit_forecast(ts_m: pd.Series, steps: int, eval_months:int=6):
     hist_df = pd.DataFrame({"FECHA": ts.index, "Mensual": ts.values, "ACUM": hist_acum.values})
     return hist_df, fc_df, smape_last
 
+def nicer_line(fig: Figure, title: str):
+    fig.update_traces(mode="lines+markers", marker=dict(size=7), line=dict(width=2))
+    fig.update_layout(
+        title=title,
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        margin=dict(l=20, r=20, t=60, b=20)
+    )
+    for tr in fig.data:
+        tr.hovertemplate = "%{x|%b-%Y}<br>%{y:,.0f}<extra></extra>"
+    return fig
+
+def to_excel_bytes(sheets: dict) -> bytes:
+    """sheets: {'SheetName': DataFrame, ...} -> bytes xlsx"""
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for name, df in sheets.items():
+            df.to_excel(writer, sheet_name=name[:31], index=False)
+    return output.getvalue()
+
 # =================== CARGA ===================
 @st.cache_data(show_spinner=False)
 def load_datos(url_csv: str) -> pd.DataFrame:
     df = pd.read_csv(url_csv)
     df.columns = [c.strip() for c in df.columns]
-
-    # Normaliza nombres de columnas esperadas
     rename_map = {
         'Año': 'ANIO', 'ANO': 'ANIO', 'YEAR': 'ANIO',
         'Mes yyyy': 'MES_TXT', 'MES YYYY': 'MES_TXT', 'Mes': 'MES_TXT', 'MES': 'MES_TXT',
@@ -131,35 +138,31 @@ def load_datos(url_csv: str) -> pd.DataFrame:
     }
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
 
-    # FECHA mensual (ignora el día)
+    # FECHA mensual
     if 'MES_TXT' in df.columns:
         df['FECHA'] = pd.to_datetime(df['MES_TXT'], dayfirst=True, errors='coerce')
     else:
-        # fallback: si no hay MES_TXT, usar ANIO-01-01
         df['FECHA'] = pd.to_datetime(df.get('ANIO', pd.Series()).astype(str) + "-01-01", errors='coerce')
     df['FECHA'] = df['FECHA'].dt.to_period("M").dt.to_timestamp()
 
-    # Numéricos
+    # Números
     if 'IMP_PRIMA' in df.columns:
         df['IMP_PRIMA'] = parse_number_co(df['IMP_PRIMA'])
     if 'IMP_PRIMA_CUOTA' in df.columns:
         df['IMP_PRIMA_CUOTA'] = parse_number_co(df['IMP_PRIMA_CUOTA'])
+    else:
+        st.stop()  # presupuesto es obligatorio
 
-    # PRESUPUESTO = Imp Prima Cuota (obligatorio)
-    if 'IMP_PRIMA_CUOTA' not in df.columns:
-        st.stop()  # no seguimos si no existe presupuesto
+    # PRESUPUESTO desde Imp Prima Cuota
     df['PRESUPUESTO'] = df['IMP_PRIMA_CUOTA']
 
-    # Limpieza strings
+    # Strings y año
     for c in ['SUCURSAL', 'LINEA', 'COMPANIA']:
         if c in df.columns:
             df[c] = df[c].astype(str).str.strip().str.upper()
-
-    # Año (derivado de FECHA si no viene)
     if 'ANIO' not in df.columns:
         df['ANIO'] = df['FECHA'].dt.year
 
-    # Mantener columnas clave
     keep = [x for x in ['ANIO','FECHA','SUCURSAL','LINEA','COMPANIA','IMP_PRIMA','PRESUPUESTO'] if x in df.columns]
     df = df[keep].dropna(subset=['FECHA']).copy()
     return df
@@ -180,7 +183,7 @@ suc = st.sidebar.selectbox("Código y Sucursal:", suc_opts)
 lin = st.sidebar.selectbox("Línea:", linea_opts)
 comp = st.sidebar.selectbox("Compañía:", comp_opts)
 
-periodos_forecast = st.sidebar.number_input("Meses a proyectar:", 1, 24, 6, 1)
+periodos_forecast = st.sidebar.number_input("Meses a proyectar (vista PRIMAS):", 1, 24, 6, 1)
 
 # Aplica filtros
 df_sel = df[df['ANIO'].isin(year_sel)].copy()
@@ -191,138 +194,188 @@ if lin != "TODAS" and 'LINEA' in df_sel.columns:
 if comp != "TODAS" and 'COMPANIA' in df_sel.columns:
     df_sel = df_sel[df_sel['COMPANIA'] == comp]
 
-# Series mensuales (NO ACUMULADO)
-serie_prima = df_sel.groupby('FECHA')['IMP_PRIMA'].sum().sort_index() if 'IMP_PRIMA' in df_sel.columns else pd.Series(dtype=float)
-serie_presu = df_sel.groupby('FECHA')['PRESUPUESTO'].sum().sort_index() if 'PRESUPUESTO' in df_sel.columns else pd.Series(dtype=float)
+serie_prima = df_sel.groupby('FECHA')['IMP_PRIMA'].sum().sort_index()
+serie_presu = df_sel.groupby('FECHA')['PRESUPUESTO'].sum().sort_index()
 
-# Si no hay datos, salimos con aviso claro
 if serie_prima.empty:
     st.warning("No hay datos de IMP_PRIMA con los filtros seleccionados.")
     st.stop()
 
 # =================== TABS ===================
-tabs = st.tabs(["📈 Primas (forecast & cierre)", "🧭 Presupuesto (cumplimiento & 2026)"])
+tabs = st.tabs(["📈 Primas (forecast & cierre)", "🧭 Presupuesto 2026"])
 
 # --------- TAB PRIMAS ---------
 with tabs[0]:
-    st.subheader("Forecast mensual de Primas y cierre del año en curso")
+    st.subheader("Forecast de Primas (mensual) y cierre 2025")
 
-    hist_df, fc_df, smape6 = fit_forecast(serie_prima, steps=periodos_forecast, eval_months=6)
+    hist_df, fc_df, smape6 = fit_forecast(serie_prima, steps=max(periodos_forecast, 12), eval_months=6)
 
-    # Métricas de cierre del año actual
     anio_actual = pd.Timestamp.today().year
-    mes_actual = pd.Timestamp.today().month
-    ytd = serie_prima[serie_prima.index.year == anio_actual].sum()
-
     last_idx = serie_prima.index.max()
-    pasos_restantes = 12 - last_idx.month if last_idx.year == anio_actual else max(0, 12 - mes_actual + 1)
-    cierre_estimado = ytd + (fc_df['Forecast_mensual'].head(pasos_restantes).sum() if pasos_restantes > 0 else 0.0)
+    # meses faltantes 2025 (si el último dato ya es 2025)
+    faltantes_2025 = 0
+    if last_idx.year == anio_actual:
+        faltantes_2025 = 12 - last_idx.month
+    # cierre estimado 2025
+    ytd_2025 = serie_prima[serie_prima.index.year == anio_actual].sum()
+    cierre_2025 = ytd_2025 + (fc_df['Forecast_mensual'].head(faltantes_2025).sum() if faltantes_2025 > 0 else 0.0)
 
     c1, c2, c3 = st.columns(3)
-    c1.metric(f"YTD {anio_actual}", f"${ytd:,.0f}".replace(",", "."))
+    c1.metric(f"YTD {anio_actual}", f"${ytd_2025:,.0f}".replace(",", "."))
     c2.metric("SMAPE validación", f"{smape6:.2f}%" if not np.isnan(smape6) else "s/datos")
-    c3.metric(f"Cierre estimado {anio_actual}", f"${cierre_estimado:,.0f}".replace(",", "."))
+    c3.metric(f"Cierre estimado {anio_actual}", f"${cierre_2025:,.0f}".replace(",", "."))
 
-    # Gráfico mensual (NO ACUMULADO) + forecast
-    fig_m = px.line(hist_df, x="FECHA", y="Mensual", title="Primas mensuales (histórico) y forecast")
+    # Gráfico mensual + forecast
+    fig_m = px.line(hist_df, x="FECHA", y="Mensual", title="")
+    fig_m = nicer_line(fig_m, "Primas mensuales (histórico) y forecast")
     if not fc_df.empty:
-        fig_m.add_scatter(x=fc_df["FECHA"], y=fc_df["Forecast_mensual"],
-                          mode="lines+markers", name="Forecast (mensual)", line=dict(dash="dot"))
-        fig_m.add_scatter(x=fc_df["FECHA"], y=fc_df["IC_lo"], mode="lines", name="IC 95% inf", opacity=0.4)
-        fig_m.add_scatter(x=fc_df["FECHA"], y=fc_df["IC_hi"], mode="lines", name="IC 95% sup", opacity=0.4)
+        fig_m.add_scatter(x=fc_df["FECHA"], y=fc_df["Forecast_mensual"], name="Forecast (mensual)", mode="lines+markers")
+        fig_m.add_scatter(x=fc_df["FECHA"], y=fc_df["IC_lo"], name="IC 95% inf", mode="lines")
+        fig_m.add_scatter(x=fc_df["FECHA"], y=fc_df["IC_hi"], name="IC 95% sup", mode="lines")
     st.plotly_chart(fig_m, use_container_width=True)
 
-    # Gráfico acumulado para referencia visual
-    fig_a = px.line(hist_df, x="FECHA", y="ACUM", title="Primas acumuladas (histórico) y proyección acumulada")
+    # Gráfico acumulado
+    fig_a = px.line(hist_df, x="FECHA", y="ACUM", title="")
+    fig_a = nicer_line(fig_a, "Primas acumuladas (histórico) y proyección acumulada")
     if not fc_df.empty:
-        fig_a.add_scatter(x=fc_df["FECHA"], y=fc_df["Forecast_acum"],
-                          mode="lines+markers", name="Forecast (acum)", line=dict(dash="dot"))
+        fig_a.add_scatter(x=fc_df["FECHA"], y=fc_df["Forecast_acum"], name="Forecast (acum)", mode="lines+markers")
     st.plotly_chart(fig_a, use_container_width=True)
 
-# --------- TAB PRESUPUESTO ---------
-with tabs[1]:
-    st.subheader("Cumplimiento del Presupuesto (año actual) y Presupuesto sugerido 2026")
+    # ---- Tabla "6 próximos meses no cerrados" (dinámica) ----
+    st.markdown("### Próximos meses proyectados (no cerrados en 2025)")
+    meses_mostrar = st.slider("Meses a listar (faltantes de 2025):", 1, max(faltantes_2025 if faltantes_2025>0 else 6, 6), min(6, max(faltantes_2025, 1)))
+    tabla_faltantes = pd.DataFrame(columns=["Mes", "Proyección", "IC 95% inf", "IC 95% sup"])
 
-    # Alinea presupuesto a MS y calcula acumulados
-    if not serie_presu.empty:
-        serie_presu = ensure_monthly(serie_presu)
+    if faltantes_2025 > 0:
+        sel = fc_df.head(meses_mostrar).copy()
+        tabla_faltantes = pd.DataFrame({
+            "Mes": sel["FECHA"].dt.strftime("%b-%Y"),
+            "Proyección": sel["Forecast_mensual"].round(0).astype(int),
+            "IC 95% inf": sel["IC_lo"].round(0).astype(int),
+            "IC 95% sup": sel["IC_hi"].round(0).astype(int),
+        })
     else:
-        st.info("No hay columna de presupuesto. Recuerda: **Imp Prima Cuota** es el presupuesto (PRESUPUESTO).")
-        serie_presu = pd.Series(dtype=float)
+        st.info("No hay meses faltantes en el año actual con los datos cargados; se muestran los próximos 6 meses de forecast.")
+        sel = fc_df.head(6).copy()
+        tabla_faltantes = pd.DataFrame({
+            "Mes": sel["FECHA"].dt.strftime("%b-%Y"),
+            "Proyección": sel["Forecast_mensual"].round(0).astype(int),
+            "IC 95% inf": sel["IC_lo"].round(0).astype(int),
+            "IC 95% sup": sel["IC_hi"].round(0).astype(int),
+        })
+
+    st.dataframe(tabla_faltantes, use_container_width=True)
+
+    # ---- Resumen amigable ----
+    st.success(
+        f"Según el modelo, **así cierran los meses faltantes de {anio_actual}** y el **cierre estimado** del año es "
+        f"**${cierre_2025:,.0f}**. Ajusta estrategias mes a mes según la proyección mostrada."
+        .replace(",", ".")
+    )
+
+    # ---- Exportar a Excel (PRIMAS) ----
+    hist_tbl = hist_df.copy()
+    hist_tbl["FECHA"] = hist_tbl["FECHA"].dt.strftime("%Y-%m")
+    fc_tbl = fc_df.copy()
+    fc_tbl["FECHA"] = fc_tbl["FECHA"].dt.strftime("%Y-%m")
+    falt_tbl = tabla_faltantes.copy()
+
+    xls_bytes = to_excel_bytes({
+        "Historico": hist_tbl,
+        "Forecast 2025 (faltantes)": falt_tbl,
+        "Forecast completo": fc_tbl
+    })
+    st.download_button(
+        "⬇️ Descargar Excel (PRIMAS)",
+        data=xls_bytes,
+        file_name="primas_forecast.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+# --------- TAB PRESUPUESTO 2026 ---------
+with tabs[1]:
+    st.subheader("Ejecución vs Presupuesto 2025 y Presupuesto sugerido 2026")
 
     anio_actual = pd.Timestamp.today().year
-    mes_actual = pd.Timestamp.today().month
 
-    ejec_act = ensure_monthly(serie_prima[serie_prima.index.year == anio_actual])
-    pres_act = ensure_monthly(serie_presu[serie_presu.index.year == anio_actual]) if not serie_presu.empty else pd.Series(dtype=float)
+    # Alinea series
+    serie_prima = ensure_monthly(serie_prima)
+    serie_presu = ensure_monthly(serie_presu)
 
-    ytd_ejec = ejec_act.loc[ejec_act.index <= pd.Timestamp(f"{anio_actual}-{mes_actual:02d}-01")].sum()
-    ytd_pres = pres_act.loc[pres_act.index <= pd.Timestamp(f"{anio_actual}-{mes_actual:02d}-01")].sum() if not pres_act.empty else np.nan
-    var_abs = (ytd_ejec - ytd_pres) if not np.isnan(ytd_pres) else np.nan
-    var_pct = (var_abs / ytd_pres * 100) if ytd_pres and not np.isnan(ytd_pres) and ytd_pres != 0 else np.nan
+    ejec_2025 = serie_prima[serie_prima.index.year == anio_actual]
+    pres_2025 = serie_presu[serie_presu.index.year == anio_actual]
 
-    # Proyección de cierre vs presupuesto anual
-    _, fc_cierre, _ = fit_forecast(serie_prima, steps=max(0, 12 - serie_prima.index.max().month) + 12)
-    restante = 12 - serie_prima.index.max().month if serie_prima.index.max().year == anio_actual else 0
-    proy_rest = fc_cierre['Forecast_mensual'].head(restante).sum() if restante > 0 else 0.0
-    cierre_est = ejec_act.sum() + proy_rest
-    presup_anual = pres_act.sum() if not pres_act.empty else np.nan
-    gap_cierre = (cierre_est - presup_anual) if not np.isnan(presup_anual) else np.nan
-    gap_pct = (gap_cierre / presup_anual * 100) if presup_anual and not np.isnan(presup_anual) and presup_anual != 0 else np.nan
+    ytd_ejec = ejec_2025.loc[ejec_2025.index <= pd.Timestamp(f"{anio_actual}-{pd.Timestamp.today().month:02d}-01")].sum()
+    ytd_pres = pres_2025.loc[pres_2025.index <= pd.Timestamp(f"{anio_actual}-{pd.Timestamp.today().month:02d}-01")].sum() if not pres_2025.empty else np.nan
+    var_pct = ((ytd_ejec - ytd_pres) / ytd_pres * 100) if ytd_pres and not np.isnan(ytd_pres) and ytd_pres != 0 else np.nan
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Presupuesto YTD", f"${ytd_pres:,.0f}".replace(",", ".") if not np.isnan(ytd_pres) else "s/datos")
-    c2.metric("Ejecutado YTD", f"${ytd_ejec:,.0f}".replace(",", "."), delta=(f"{var_pct:+.1f}%" if not np.isnan(var_pct) else None))
-    c3.metric(f"Cierre estimado {anio_actual}", f"${cierre_est:,.0f}".replace(",", "."), delta=(f"{gap_pct:+.1f}% vs. Presup." if not np.isnan(gap_pct) else None))
-    c4.metric("Presupuesto Anual", f"${presup_anual:,.0f}".replace(",", ".") if not np.isnan(presup_anual) else "s/datos")
+    # Proyección de cierre 2025 del presupuesto (cómo se espera ejecutar mes a mes en 2025)
+    _, fc_2025, _ = fit_forecast(serie_prima, steps=max(0, 12 - serie_prima.index.max().month))
+    proy_2025_mensual = pd.Series(dtype=float)
+    if not fc_2025.empty:
+        proy_2025_mensual = fc_2025.set_index("FECHA")["Forecast_mensual"]
+    cierre_ejec_2025 = ejec_2025.sum() + proy_2025_mensual.sum()
 
-    # Acumulado: Presupuesto vs Ejecutado
-    comp_df = pd.DataFrame(index=pd.date_range(f"{anio_actual}-01-01", f"{anio_actual}-12-01", freq="MS"))
-    comp_df["Presupuesto Acum"] = pres_act.reindex(comp_df.index).fillna(0).cumsum() if not pres_act.empty else np.nan
-    comp_df["Ejecutado Acum"] = ejec_act.reindex(comp_df.index).fillna(0).cumsum()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Presupuesto 2025 YTD", f"${ytd_pres:,.0f}".replace(",", ".") if not np.isnan(ytd_pres) else "s/datos")
+    c2.metric("Ejecutado 2025 YTD", f"${ytd_ejec:,.0f}".replace(",", "."), delta=(f"{var_pct:+.1f}%" if not np.isnan(var_pct) else None))
+    c3.metric("Cierre estimado 2025 (ejecución)", f"${cierre_ejec_2025:,.0f}".replace(",", "."))
 
-    if restante > 0:
-        cierre_acum = comp_df["Ejecutado Acum"].iloc[-1] + fc_cierre['Forecast_mensual'].head(restante).cumsum()
-        comp_df["Cierre Est. Acum"] = list(comp_df["Ejecutado Acum"].values) + list(cierre_acum.values)
-        comp_df["Cierre Est. Acum"] = comp_df["Cierre Est. Acum"].fillna(method="ffill")
+    # Línea: ejecutado vs presupuesto 2025 (mensual) + proyección de ejecución 2025
+    comp_2025 = pd.DataFrame(index=pd.date_range(f"{anio_actual}-01-01", f"{anio_actual}-12-01", freq="MS"))
+    comp_2025["Presupuesto 2025"] = pres_2025.reindex(comp_2025.index)
+    comp_2025["Ejecutado 2025"] = ejec_2025.reindex(comp_2025.index)
+    if not proy_2025_mensual.empty:
+        comp_2025.loc[proy_2025_mensual.index, "Proyección ejecución 2025"] = proy_2025_mensual.values
 
-    y_cols = ["Presupuesto Acum", "Ejecutado Acum"] + (["Cierre Est. Acum"] if "Cierre Est. Acum" in comp_df.columns else [])
-    figp = px.line(comp_df.reset_index(names="FECHA"), x="FECHA", y=y_cols, title="Cumplimiento vs Presupuesto (acumulado)")
+    figp = px.line(comp_2025.reset_index(names="FECHA"), x="FECHA",
+                   y=[c for c in ["Presupuesto 2025","Ejecutado 2025","Proyección ejecución 2025"] if c in comp_2025.columns],
+                   title="")
+    figp = nicer_line(figp, "2025: Presupuesto vs Ejecutado y proyección mensual")
     st.plotly_chart(figp, use_container_width=True)
 
-    # Presupuesto sugerido 2026 (con IC)
-    st.markdown("### Presupuesto sugerido 2026 (mensual)")
-
+    # -------- Presupuesto sugerido 2026 (mensual + IC) --------
     pasos_hasta_2026 = (12 - serie_prima.index.max().month) if serie_prima.index.max().year == anio_actual else 0
     pasos_total = pasos_hasta_2026 + 12
     _, fc_ext, _ = fit_forecast(serie_prima, steps=pasos_total, eval_months=6)
-    sug_2026 = fc_ext.tail(12).set_index("FECHA")["Forecast_mensual"]
+    sug_2026 = fc_ext.tail(12).set_index("FECHA")
     sug_2026.index = pd.date_range("2026-01-01", "2026-12-01", freq="MS")
-    ic_lo = fc_ext.tail(12).set_index("FECHA")["IC_lo"].values
-    ic_hi = fc_ext.tail(12).set_index("FECHA")["IC_hi"].values
 
-    total_2026 = sug_2026.sum()
-    st.metric("Total sugerido 2026", f"${total_2026:,.0f}".replace(",", "."))
-
-    sug_df = pd.DataFrame({
+    presupuesto_2026_df = pd.DataFrame({
         "FECHA": sug_2026.index,
-        "Sugerido 2026": sug_2026.values,
-        "IC 95% inf": ic_lo,
-        "IC 95% sup": ic_hi
+        "Presupuesto sugerido 2026": sug_2026["Forecast_mensual"].round(0).astype(int),
+        "IC 95% inf": sug_2026["IC_lo"].round(0).astype(int),
+        "IC 95% sup": sug_2026["IC_hi"].round(0).astype(int)
     })
-    figb = px.bar(sug_df, x="FECHA", y="Sugerido 2026", title="Presupuesto sugerido 2026 (mensual)")
-    figb.add_scatter(x=sug_df["FECHA"], y=sug_df["IC 95% inf"], mode="lines", name="IC 95% inf", opacity=0.5)
-    figb.add_scatter(x=sug_df["FECHA"], y=sug_df["IC 95% sup"], mode="lines", name="IC 95% sup", opacity=0.5)
+    total_2026 = presupuesto_2026_df["Presupuesto sugerido 2026"].sum()
+    st.success(f"**Presupuesto sugerido 2026 (total): ${total_2026:,.0f}**".replace(",", "."))
+
+    st.dataframe(presupuesto_2026_df, use_container_width=True)
+
+    figb = px.bar(presupuesto_2026_df, x="FECHA", y="Presupuesto sugerido 2026", title="")
+    figb.update_traces(marker_line_width=0.5)
+    figb.add_scatter(x=presupuesto_2026_df["FECHA"], y=presupuesto_2026_df["IC 95% inf"], name="IC 95% inf", mode="lines+markers")
+    figb.add_scatter(x=presupuesto_2026_df["FECHA"], y=presupuesto_2026_df["IC 95% sup"], name="IC 95% sup", mode="lines+markers")
+    for tr in figb.data:
+        tr.hovertemplate = "%{x|%b-%Y}<br>%{y:,.0f}<extra></extra>"
     st.plotly_chart(figb, use_container_width=True)
 
-    with st.expander("Ver tabla 2026"):
-        st.dataframe(sug_df, use_container_width=True)
+    # ---- Excel exportable (PRESUPUESTO) ----
+    # Incluye: 2025 comparativo y 2026 sugerido
+    comp_2025_tbl = comp_2025.reset_index().rename(columns={"index":"FECHA"})
+    comp_2025_tbl["FECHA"] = comp_2025_tbl["FECHA"].dt.strftime("%Y-%m")
+    p2026_tbl = presupuesto_2026_df.copy()
+    p2026_tbl["FECHA"] = p2026_tbl["FECHA"].dt.strftime("%Y-%m")
 
+    xls_pres = to_excel_bytes({
+        "2025 Pres vs Ejec": comp_2025_tbl,
+        "2026 Presupuesto sugerido": p2026_tbl
+    })
     st.download_button(
-        "⬇️ Descargar presupuesto sugerido 2026 (CSV)",
-        data=sug_df.to_csv(index=False).encode("utf-8"),
-        file_name="presupuesto_sugerido_2026.csv",
-        mime="text/csv"
+        "⬇️ Descargar Excel (PRESUPUESTO 2025-2026)",
+        data=xls_pres,
+        file_name="presupuesto_2025_2026.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
 # ------------------ Audio sutil ------------------
