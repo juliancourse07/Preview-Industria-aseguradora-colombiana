@@ -48,7 +48,7 @@ body {background: radial-gradient(1200px 800px at 10% 10%, #0b1220 0%, #0a0f1a 4
 <div class="glow"></div>
 """, unsafe_allow_html=True)
 
-# Sonido futurista al entrar
+# Sonido futurista (intento de autoplay – puede depender del navegador)
 st.markdown("""
 <audio id="intro-audio" src="https://cdn.pixabay.com/download/audio/2024/01/09/audio_ee3a8b2b42.mp3?filename=futuristic-digital-sweep-168473.mp3"></audio>
 <script>
@@ -74,7 +74,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 st.title("AseguraView · Primas & Presupuesto")
-st.caption("Forecast mensual (SARIMAX), cierre estimado 2025 y presupuesto sugerido 2026 por Año / Sucursal / Línea / Compañía.")
+st.caption("Forecast mensual (SARIMAX), nowcast del mes en curso, cierre estimado 2025 y presupuesto sugerido 2026 (con IPC), por Año / Sucursal / Línea / Compañía.")
 
 # ============ DATOS ============
 SHEET_ID = "1ThVwW3IbkL7Dw_Vrs9heT1QMiHDZw1Aj-n0XNbDi9i8"   # <-- cambia si usas otro
@@ -124,6 +124,23 @@ def sanitize_trailing_zeros(ts: pd.Series, ref_year: int) -> pd.Series:
     if ts.last_valid_index() is not None:
         ts = ts.loc[:ts.last_valid_index()]
     return ts.dropna()
+
+def split_series_excluding_partial_current(ts: pd.Series, ref_year: int):
+    """
+    Si el último punto es el mes actual y estamos antes de fin de mes,
+    lo excluimos del entrenamiento (para no sesgar a la baja).
+    Devolvemos la serie limpia, el timestamp del mes actual y si había parcial.
+    Regla: si hoy es día < 28, consideramos el mes como potencialmente parcial.
+    """
+    ts = ensure_monthly(ts.copy())
+    today = pd.Timestamp.today()
+    cur_m = pd.Timestamp(year=today.year, month=today.month, day=1)
+    if len(ts) == 0:
+        return ts, None, False
+    if ts.index.max() == cur_m and today.day < 28:
+        ts.loc[cur_m] = np.nan
+        return ts.dropna(), cur_m, True
+    return ts.dropna(), None, False
 
 def fit_forecast(ts_m: pd.Series, steps: int, eval_months:int=6):
     if steps < 1: steps = 1
@@ -256,7 +273,7 @@ periodos_forecast = st.sidebar.number_input(
     "Meses a proyectar (vista PRIMAS):", 1, 24, 6, 1
 )
 
-# Nuevo: IPC proyectado 2026
+# IPC proyectado 2026
 ipc_2026 = st.sidebar.number_input(
     "IPC proyectado para 2026 (%)", min_value=-5.0, max_value=30.0, value=7.0, step=0.1,
     help="Aumento esperado de IPC para ajustar el presupuesto sugerido 2026."
@@ -296,34 +313,56 @@ with tabs[0]:
       además de pronosticar <b>cierres de año</b> y sugerir el <b>presupuesto 2026</b> con base en el comportamiento mensual histórico.
       <br><br>
       <b>¿Cómo lo hace?</b><br>
-      • Aplica <b>SARIMAX</b> (estacionalidad 12 meses) para proyectar los meses que faltan del año actual y todo 2026.<br>
-      • Limpia meses sin cierre (ceros al final) para evitar sesgos.<br>
-      • <b>Presupuesto 2026</b>: se ajusta automáticamente por el <b>IPC proyectado</b> configurado en el panel lateral (<i>{ipc}%</i>).<br>
-      • Muestra rangos de confianza (IC 95%) y permite exportar a Excel.
+      • <b>SARIMAX</b> (estacionalidad 12) para meses faltantes del año actual y todo 2026.<br>
+      • Limpieza de ceros finales y <b>exclusión del mes actual si está parcial</b> (nowcast) para evitar sesgos a la baja.<br>
+      • <b>Presupuesto 2026</b>: se ajusta automáticamente por el <b>IPC proyectado</b> que defines en el panel lateral (<i>{ipc:.1f}%</i>).<br>
+      • IC 95%, tablas exportables a Excel y modo ejecutivo con escenarios.
       <br><br>
-      <b>¿Quién puede usarlo?</b> Fuerza comercial, producto, finanzas y dirección. No requiere conocimiento técnico.
+      <i>Nota:</i> Si el mes en curso no está completo (p. ej., septiembre hasta el día 23), se estima con el modelo (nowcast) y se suma al YTD.
     </div>
     """.format(ipc=ipc_2026), unsafe_allow_html=True)
 
 # --------- TAB PRIMAS ---------
 with tabs[1]:
     ref_year = int(df['FECHA'].max().year)
-    last_real_month = last_actual_month_from_df(df_noYear, ref_year)
-    meses_faltantes = max(0, 12 - last_real_month)
 
-    serie_train = sanitize_trailing_zeros(serie_prima_all.copy(), ref_year)
+    # 1) Prepara serie y excluye mes actual parcial para entrenar
+    base_series = sanitize_trailing_zeros(serie_prima_all.copy(), ref_year)
+    serie_train, cur_month_ts, had_partial = split_series_excluding_partial_current(base_series, ref_year)
+
+    # 2) Define meses faltantes según último mes cerrado
+    if had_partial and cur_month_ts is not None:
+        last_closed_month = cur_month_ts.month - 1
+    else:
+        last_closed_month = last_actual_month_from_df(df_noYear, ref_year)
+    meses_faltantes = max(0, 12 - last_closed_month)
+
+    # 3) Entrena y pronostica
     hist_df, fc_df, smape6 = fit_forecast(serie_train, steps=max(1, meses_faltantes), eval_months=6)
+
+    # 4) Si hay mes parcial, el primer paso es el nowcast del mes actual
+    nowcast_actual = None
+    if had_partial and not fc_df.empty and cur_month_ts is not None:
+        if fc_df.iloc[0]["FECHA"] != cur_month_ts:
+            fc_df.iloc[0, fc_df.columns.get_loc("FECHA")] = cur_month_ts
+        nowcast_actual = float(fc_df.iloc[0]["Forecast_mensual"])
 
     # Serie 2024 para comparación
     serie_2024 = ensure_monthly(serie_prima_all[serie_prima_all.index.year == 2024])
     df_2024 = pd.DataFrame({"FECHA": serie_2024.index, "Mensual_2024": serie_2024.values})
     df_2024["ACUM_2024"] = serie_2024.cumsum().values
 
-    # KPIs
-    ytd_ref = serie_prima_all[serie_prima_all.index.year == ref_year].sum()
-    cierre_ref = ytd_ref + (fc_df['Forecast_mensual'].head(meses_faltantes).sum() if meses_faltantes>0 else 0.0)
+    # KPIs con nowcast del mes actual (si aplica)
+    ytd_cerrado = serie_train[serie_train.index.year == ref_year].sum()
+    ytd_ref = ytd_cerrado + (nowcast_actual if nowcast_actual is not None else 0.0)
 
-    # --- Cierre anual 2024 ---
+    if had_partial and nowcast_actual is not None and len(fc_df) > 1:
+        resto = fc_df['Forecast_mensual'].iloc[1:].sum()
+    else:
+        resto = fc_df['Forecast_mensual'].sum()
+    cierre_ref = ytd_ref + resto
+
+    # Cierre anual 2024
     cierre_2024 = float(serie_2024.sum()) if not serie_2024.empty else 0.0
 
     c1, c2, c3, c4 = st.columns(4)
@@ -367,16 +406,17 @@ with tabs[1]:
                         annotation_position="top left")
     st.plotly_chart(fig_a, use_container_width=True)
 
-    # Tabla de faltantes 2025 con columna "Mismo mes 2024"
+    # Tabla de faltantes (incluye "Mismo mes 2024")
     st.markdown(f"### Próximos meses proyectados (no cerrados en {ref_year})")
     if meses_faltantes > 0:
         meses_mostrar = st.slider(f"Meses a listar (faltantes de {ref_year}):", 1, meses_faltantes, min(6, meses_faltantes))
         sel = fc_df.head(meses_mostrar).copy()
         # Mismo mes 2024
+        serie_2024_idx = serie_2024.copy()
         mismo_mes_2024 = []
         for d in sel["FECHA"]:
             try:
-                valor = serie_2024.loc[pd.Timestamp(year=2024, month=d.month, day=1)]
+                valor = serie_2024_idx.loc[pd.Timestamp(year=2024, month=d.month, day=1)]
             except KeyError:
                 valor = np.nan
             mismo_mes_2024.append(valor)
@@ -391,7 +431,7 @@ with tabs[1]:
     else:
         st.info(f"No quedan meses por cerrar en {ref_year} con los datos actuales.")
 
-    st.success(f"Así se proyectan los meses faltantes de {ref_year} y el **cierre estimado** del año es **{fmt_cop(cierre_ref)}**.")
+    st.success(f"Con nowcast para el mes en curso, el **YTD {ref_year}** es **{fmt_cop(ytd_ref)}** y el **cierre estimado** asciende a **{fmt_cop(cierre_ref)}**.")
 
     # Excel
     hist_tbl = hist_df.copy(); hist_tbl["FECHA"] = hist_tbl["FECHA"].dt.strftime("%Y-%m")
@@ -407,49 +447,80 @@ with tabs[2]:
     st.caption(f"Nota: el presupuesto 2026 aplica un ajuste automático de **IPC proyectado {ipc_2026:.1f}%**.")
 
     ref_year = int(df['FECHA'].max().year)
+
+    # Series ejecutado y presupuesto (mensuales)
     serie_exec = ensure_monthly(serie_prima_all)
     serie_pres = ensure_monthly(serie_presu_all)
-    ejec_ref = serie_exec[serie_exec.index.year == ref_year]
     pres_ref = serie_pres[serie_pres.index.year == ref_year]
 
+    # Excluir mes actual parcial en ejecutado (mismo criterio)
+    serie_exec_clean0 = sanitize_trailing_zeros(serie_exec, ref_year)
+    serie_exec_clean, cur_m_ref, had_partial_ref = split_series_excluding_partial_current(serie_exec_clean0, ref_year)
+
+    if had_partial_ref and cur_m_ref is not None:
+        last_closed_month_ref = cur_m_ref.month - 1
+    else:
+        last_closed_month_ref = last_actual_month_from_df(df_noYear, ref_year)
+    meses_falt_ref = max(0, 12 - last_closed_month_ref)
+
+    # Pronóstico de ejecución para completar el año
+    _, fc_ref, _ = fit_forecast(serie_exec_clean, steps=max(1, meses_falt_ref))
+
+    # Nowcast para el mes actual (si parcial)
+    nowcast_ref = None
+    if had_partial_ref and not fc_ref.empty and cur_m_ref is not None:
+        if fc_ref.iloc[0]["FECHA"] != cur_m_ref:
+            fc_ref.iloc[0, fc_ref.columns.get_loc("FECHA")] = cur_m_ref
+        nowcast_ref = float(fc_ref.iloc[0]["Forecast_mensual"])
+
+    # Ejecutado YTD = cerrados + nowcast de mes actual (si aplica)
+    ytd_ejec_cerrado = serie_exec_clean[serie_exec_clean.index.year == ref_year].sum()
+    ytd_ejec = ytd_ejec_cerrado + (nowcast_ref if nowcast_ref is not None else 0.0)
+
+    # Presupuesto YTD con corte al mes actual del sistema
     this_month = pd.Timestamp.today().month
-    ytd_ejec = ejec_ref.loc[ejec_ref.index <= pd.Timestamp(f"{ref_year}-{this_month:02d}-01")].sum()
     ytd_pres = pres_ref.loc[pres_ref.index <= pd.Timestamp(f"{ref_year}-{this_month:02d}-01")].sum() if not pres_ref.empty else np.nan
     var_pct = ((ytd_ejec - ytd_pres) / ytd_pres * 100) if ytd_pres and not np.isnan(ytd_pres) and ytd_pres != 0 else np.nan
 
-    last_real_month = last_actual_month_from_df(df_noYear, ref_year)
-    meses_falt_ref = max(0, 12 - last_real_month)
-    serie_exec_clean = sanitize_trailing_zeros(serie_exec, ref_year)
-    _, fc_ref, _ = fit_forecast(serie_exec_clean, steps=max(1, meses_falt_ref))
-    proy_ref_mensual = fc_ref.set_index("FECHA")["Forecast_mensual"] if meses_falt_ref > 0 else pd.Series(dtype=float)
-    cierre_ejec_ref = ejec_ref.sum() + (proy_ref_mensual.sum() if not proy_ref_mensual.empty else 0.0)
+    # Resto del año (evitando doble contar nowcast)
+    if had_partial_ref and nowcast_ref is not None and len(fc_ref) > 1:
+        resto_ref = fc_ref['Forecast_mensual'].iloc[1:].sum()
+    else:
+        resto_ref = fc_ref['Forecast_mensual'].sum()
+    cierre_ejec_ref = ytd_ejec + resto_ref
 
     c1,c2,c3 = st.columns(3)
     c1.metric(f"Presupuesto {ref_year} YTD", fmt_cop(ytd_pres) if not np.isnan(ytd_pres) else "s/datos")
-    c2.metric(f"Ejecutado {ref_year} YTD", fmt_cop(ytd_ejec),
+    c2.metric(f"Ejecutado {ref_year} YTD (con nowcast)", fmt_cop(ytd_ejec),
               delta=(f"{var_pct:+.1f}%" if not np.isnan(var_pct) else None))
     c3.metric(f"Cierre estimado {ref_year} (ejecución)", fmt_cop(cierre_ejec_ref))
 
+    # Serie mensual comparativa: Presupuesto vs Ejecutado (con nowcast) + proyección
     comp_ref = pd.DataFrame(index=pd.date_range(f"{ref_year}-01-01", f"{ref_year}-12-01", freq="MS"))
     comp_ref["Presupuesto"] = pres_ref.reindex(comp_ref.index) if not pres_ref.empty else np.nan
-    comp_ref["Ejecutado"]   = ejec_ref.reindex(comp_ref.index)
-    if meses_falt_ref > 0 and not proy_ref_mensual.empty:
-        idx_common = comp_ref.index.intersection(proy_ref_mensual.index)
-        if len(idx_common) > 0:
-            comp_ref.loc[idx_common, "Proyección ejecución"] = proy_ref_mensual.loc[idx_common].values
+    ejec_mes = serie_exec_clean.reindex(comp_ref.index)  # meses cerrados
+    if had_partial_ref and cur_m_ref in comp_ref.index and nowcast_ref is not None:
+        ejec_mes.loc[cur_m_ref] = nowcast_ref
+    comp_ref["Ejecutado"] = ejec_mes
+
+    if meses_falt_ref > 0 and not fc_ref.empty:
+        fc_rest = fc_ref.copy()
+        if had_partial_ref and cur_m_ref is not None and len(fc_rest) > 0:
+            fc_rest = fc_rest.iloc[1:]  # evitar duplicar mes actual
+        if len(fc_rest) > 0:
+            comp_ref.loc[fc_rest["FECHA"], "Proyección ejecución"] = fc_rest.set_index("FECHA")["Forecast_mensual"]
 
     figp = px.line(
         comp_ref.reset_index(names="FECHA"), x="FECHA",
         y=[c for c in ["Presupuesto","Ejecutado","Proyección ejecución"] if c in comp_ref.columns], title=""
     )
-    figp = nicer_line(figp, f"{ref_year}: Presupuesto vs Ejecutado y proyección mensual")
+    figp = nicer_line(figp, f"{ref_year}: Presupuesto vs Ejecutado (con nowcast) y proyección")
     st.plotly_chart(figp, use_container_width=True)
 
-    # Sugerido 2026 (modelo) + ajuste IPC
+    # Sugerido 2026 (modelo) + ajuste IPC (usando serie robusta; fallback si pocos datos)
     serie_exec_clean_local = serie_exec_clean.copy()
     if len(serie_exec_clean_local.dropna()) < 18:
-        st.info("La muestra filtrada es corta para un pronóstico estable. "
-                "Se usará el comportamiento global como referencia para el 2026 sugerido.")
+        st.info("Muestra filtrada corta: usamos comportamiento global como referencia para 2026.")
         serie_exec_global = ensure_monthly(df.groupby('FECHA')['IMP_PRIMA'].sum().sort_index())
         serie_exec_clean_local = sanitize_trailing_zeros(serie_exec_global, ref_year)
 
@@ -476,7 +547,7 @@ with tabs[2]:
 
     comp_ref_tbl = comp_ref.reset_index().rename(columns={"index":"FECHA"}); comp_ref_tbl["FECHA"] = comp_ref_tbl["FECHA"].dt.strftime("%Y-%m")
     p2026_tbl = presupuesto_2026_df.copy(); p2026_tbl["FECHA"] = p2026_tbl["FECHA"].dt.strftime("%Y-%m")
-    xls_pres = to_excel_bytes({f"{ref_year} Pres vs Ejec": comp_ref_tbl, f"2026 Presupuesto (IPC {ipc_2026:.1f}%)": p2026_tbl})
+    xls_pres = to_excel_bytes({f"{ref_year} Pres vs Ejec (nowcast)": comp_ref_tbl, f"2026 Presupuesto (IPC {ipc_2026:.1f}%)": p2026_tbl})
     st.download_button("⬇️ Descargar Excel (PRESUPUESTO)", data=xls_pres,
                        file_name="presupuesto_refyear_y_2026_ipc.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -490,20 +561,19 @@ with tabs[3]:
         st.markdown("#### Escenario 2026 ajustado " + info_badge(
             "Mueve el porcentaje para ver cómo cambia el total anual si todos los meses de 2026 suben o bajan."
         ), unsafe_allow_html=True)
-        ajuste_pct = st.slider("Ajuste vs. sugerido 2026 (±30%)", -30, 30, 0, 1)
+        ajuste_pct = st.slider("Ajuste vs. 2026 (con IPC) (±30%)", -30, 30, 0, 1)
         if 'presupuesto_2026_df' not in locals() or presupuesto_2026_df.empty:
-            st.info("Primero calcula el presupuesto 2026 en la pestaña anterior.")
+            st.info("Primero calcula el 2026 (con IPC) en la pestaña anterior.")
         else:
             base_26 = presupuesto_2026_df.copy()
-            # Usamos como base el 2026 ya con IPC (columna 2)
-            col_base = base_26.columns[2]
-            base_26["Escenario ajustado 2026"] = (base_26[col_base]*(1+ajuste_pct/100)).round(0).astype(int)
-            total_base = int(base_26[col_base].sum())
+            base_col = base_26.columns[2]  # Ajuste IPC XX.X%
+            base_26["Escenario ajustado 2026"] = (base_26[base_col]*(1+ajuste_pct/100)).round(0).astype(int)
+            total_base = int(base_26[base_col].sum())
             total_adj  = int(base_26["Escenario ajustado 2026"].sum())
             c1,c2 = st.columns(2)
             c1.metric("Total 2026 (con IPC)", fmt_cop(total_base))
             c2.metric("Total escenario 2026", fmt_cop(total_adj), delta=f"{ajuste_pct:+d}%")
-            show_df(base_26[["FECHA",col_base,"Escenario ajustado 2026"]], key="escenario26")
+            show_df(base_26[["FECHA",base_col,"Escenario ajustado 2026"]], key="escenario26")
             xls_dir = to_excel_bytes({"2026_con_IPC_vs_ajustado": base_26.assign(FECHA=base_26["FECHA"].dt.strftime("%Y-%m"))})
             st.download_button("⬇️ Descargar Excel (Modo Director - 2026)", data=xls_dir,
                                file_name="modo_director_2026.xlsx",
@@ -556,12 +626,24 @@ with tabs[3]:
     st.markdown("---")
     try:
         yref = int(df['FECHA'].max().year)
-        ytd_ref_sum = int(serie_prima_all[serie_prima_all.index.year == yref].sum())
-        falt = max(0, 12 - last_actual_month_from_df(df_noYear, yref))
-        _, fc_tmp, _ = fit_forecast(sanitize_trailing_zeros(serie_prima_all.copy(), yref), steps=max(1, falt))
-        cierre_ref2 = int(ytd_ref_sum + (fc_tmp['Forecast_mensual'].head(falt).sum() if falt>0 else 0))
+        # Recalcular cierre ref con nowcast coherente
+        base_series2 = sanitize_trailing_zeros(serie_prima_all.copy(), yref)
+        serie_train2, cur_ts2, had_part2 = split_series_excluding_partial_current(base_series2, yref)
+        falt2 = max(0, 12 - (cur_ts2.month - 1 if had_part2 and cur_ts2 is not None else last_actual_month_from_df(df_noYear, yref)))
+        _, fc_tmp2, _ = fit_forecast(serie_train2, steps=max(1, falt2))
+        if had_part2 and cur_ts2 is not None and len(fc_tmp2)>0:
+            if fc_tmp2.iloc[0]["FECHA"] != cur_ts2:
+                fc_tmp2.iloc[0, fc_tmp2.columns.get_loc("FECHA")] = cur_ts2
+            now2 = float(fc_tmp2.iloc[0]["Forecast_mensual"])
+            resto2 = fc_tmp2['Forecast_mensual'].iloc[1:].sum() if len(fc_tmp2)>1 else 0.0
+        else:
+            now2 = 0.0
+            resto2 = fc_tmp2['Forecast_mensual'].sum()
+        ytd_cerr2 = serie_train2[serie_train2.index.year == yref].sum()
+        cierre_ref2 = int(ytd_cerr2 + now2 + resto2)
+
         total_26 = int(presupuesto_2026_df[presupuesto_2026_df.columns[2]].sum()) if 'presupuesto_2026_df' in locals() and not presupuesto_2026_df.empty else 0
-        st.info(f"**Resumen ejecutivo** — Con los datos al corte, el **cierre {yref}** se estima en **{fmt_cop(cierre_ref2)}**. "
+        st.info(f"**Resumen ejecutivo** — Con nowcast del mes en curso, el **cierre {yref}** se estima en **{fmt_cop(cierre_ref2)}**. "
                 f"Para **2026**, el **presupuesto (con IPC {ipc_2026:.1f}%)** asciende a **{fmt_cop(total_26)}**.")
     except:
         pass
