@@ -5,3 +5,5 @@ plotly
 statsmodels
 openpyxl
 pillow
+xlrd
+pyarrow
