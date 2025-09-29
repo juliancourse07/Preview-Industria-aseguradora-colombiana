@@ -2,10 +2,9 @@ streamlit
 pandas
 numpy
 plotly
-scikit-learn
+statsmodels
 openpyxl
-pillow
-pyarrow
+xgboost
 
 
 
