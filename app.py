@@ -1,4 +1,4 @@
-# app.py
+# app.py  — AseguraView con XGBoost (forecast + nowcast mes parcial + IPC 2026)
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -7,9 +7,12 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 from plotly.graph_objs import Figure
-from statsmodels.tsa.statespace.sarimax import SARIMAX
-from statsmodels.tsa.arima.model import ARIMA
 from io import BytesIO
+
+# ===== XGBoost / ML =====
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import mean_absolute_error
+import xgboost as xgb
 
 # ============ CONFIG ============
 st.set_page_config(
@@ -48,7 +51,7 @@ body {background: radial-gradient(1200px 800px at 10% 10%, #0b1220 0%, #0a0f1a 4
 <div class="glow"></div>
 """, unsafe_allow_html=True)
 
-# Sonido futurista (intento de autoplay – puede depender del navegador)
+# Sonido futurista (autoplay depende del navegador)
 st.markdown("""
 <audio id="intro-audio" src="https://cdn.pixabay.com/download/audio/2024/01/09/audio_ee3a8b2b42.mp3?filename=futuristic-digital-sweep-168473.mp3"></audio>
 <script>
@@ -67,14 +70,14 @@ st.markdown(f"""
   <img src="{LOGO_URL}" alt="Seguros del Estado" style="height:48px;object-fit:contain;border-radius:8px;" onerror="this.style.display='none'">
   <div>
     <div class="neon" style="font-size:20px;font-weight:700;">AseguraView · Colombiana Seguros del Estado S.A.</div>
-    <div style="opacity:.75">Inteligencia de negocio en tiempo real · Forecast SARIMAX</div>
+    <div style="opacity:.75">Inteligencia de negocio en tiempo real · Forecast XGBoost</div>
   </div>
 </div>
 <img src="{HERO_URL}" alt="hero" style="width:100%;height:180px;object-fit:cover;border-radius:18px;opacity:.35;margin-bottom:10px" onerror="this.style.display='none'">
 """, unsafe_allow_html=True)
 
 st.title("AseguraView · Primas & Presupuesto")
-st.caption("Forecast mensual (SARIMAX), nowcast del mes en curso, cierre estimado 2025 y presupuesto sugerido 2026 (con IPC), por Año / Sucursal / Línea / Compañía.")
+st.caption("Forecast mensual (XGBoost), nowcast del mes en curso, cierre estimado 2025 y presupuesto sugerido 2026 (con IPC), por Año / Sucursal / Línea / Compañía.")
 
 # ============ DATOS ============
 SHEET_ID = "1ThVwW3IbkL7Dw_Vrs9heT1QMiHDZw1Aj-n0XNbDi9i8"   # <-- cambia si usas otro
@@ -128,8 +131,7 @@ def sanitize_trailing_zeros(ts: pd.Series, ref_year: int) -> pd.Series:
 def split_series_excluding_partial_current(ts: pd.Series, ref_year: int):
     """
     Si el último punto es el mes actual y estamos antes de fin de mes,
-    lo excluimos del entrenamiento (para no sesgar a la baja).
-    Devolvemos la serie limpia, el timestamp del mes actual y si había parcial.
+    lo excluimos del entrenamiento (para no sesgar a la baja) y luego lo nowcasteamos.
     Regla: si hoy es día < 28, consideramos el mes como potencialmente parcial.
     """
     ts = ensure_monthly(ts.copy())
@@ -142,53 +144,121 @@ def split_series_excluding_partial_current(ts: pd.Series, ref_year: int):
         return ts.dropna(), cur_m, True
     return ts.dropna(), None, False
 
-def fit_forecast(ts_m: pd.Series, steps: int, eval_months:int=6):
+# ======= XGBoost feature engineering & forecast =======
+def _make_features_from_index(idx: pd.DatetimeIndex) -> pd.DataFrame:
+    dfX = pd.DataFrame(index=idx)
+    dfX["year"] = dfX.index.year
+    dfX["month"] = dfX.index.month
+    dfX = pd.get_dummies(dfX, columns=["month"], prefix="m", drop_first=False)
+    dfX["t"] = np.arange(len(dfX))
+    return dfX
+
+def _build_supervised(ts: pd.Series, lags=(1,2,3,6,12), rolls=(3,6,12)) -> pd.DataFrame:
+    df = ts.to_frame("y")
+    for L in lags:
+        df[f"lag_{L}"] = df["y"].shift(L)
+    for W in rolls:
+        df[f"roll_mean_{W}"] = df["y"].shift(1).rolling(W, min_periods=max(2, int(W/2))).mean()
+        df[f"roll_std_{W}"]  = df["y"].shift(1).rolling(W, min_periods=max(2, int(W/2))).std()
+    Xcal = _make_features_from_index(df.index)
+    df = df.join(Xcal)
+    df = df.dropna()
+    return df
+
+def _train_xgb_with_es(X_train, y_train, X_val, y_val):
+    model = xgb.XGBRegressor(
+        n_estimators=2000,
+        learning_rate=0.02,
+        max_depth=6,
+        subsample=0.9,
+        colsample_bytree=0.9,
+        reg_lambda=1.0,
+        objective="reg:squarederror",
+        random_state=42,
+        tree_method="hist"
+    )
+    model.fit(
+        X_train, y_train,
+        eval_set=[(X_val, y_val)],
+        verbose=False,
+        early_stopping_rounds=100
+    )
+    return model
+
+def fit_xgb_forecast(ts_m: pd.Series, steps: int, eval_months:int=6):
+    """
+    Pronóstico con XGBoost:
+      - Lags (1,2,3,6,12), rolling (3,6,12), dummies de mes y tendencia.
+      - Validación temporal (últimos eval_months) para early stopping + sMAPE.
+      - Intervalos por Conformal Prediction (cuantil 97.5% de residuales absolutos).
+    """
     if steps < 1: steps = 1
-    ts = ensure_monthly(ts_m.copy()); y = np.log1p(ts)
+    ts = ensure_monthly(ts_m.copy())
+    if len(ts.dropna()) < 18:
+        # Pocos datos -> fallback: media por mes
+        future_idx = pd.date_range(ts.index.max() + pd.offsets.MonthBegin(), periods=steps, freq="MS")
+        by_month = ts.groupby(ts.index.month).mean()
+        preds = np.array([max(0.0, by_month.get(m, ts.mean())) for m in future_idx.month])
+        hist_acum = ts.cumsum()
+        forecast_acum = np.cumsum(preds) + (hist_acum.iloc[-1] if len(hist_acum)>0 else 0.0)
+        fc_df = pd.DataFrame({
+            "FECHA": future_idx,
+            "Forecast_mensual": preds,
+            "Forecast_acum": forecast_acum,
+            "IC_lo": np.maximum(0, preds*0.85),
+            "IC_hi": preds*1.15
+        })
+        hist_df = pd.DataFrame({"FECHA": ts.index, "Mensual": ts.values, "ACUM": hist_acum.values})
+        return hist_df, fc_df, np.nan
 
-    smapes = []
-    start = max(len(y)-eval_months, 12)
-    if len(y) >= start+1:
-        for t in range(start, len(y)):
-            y_tr = y.iloc[:t]; y_te = y.iloc[t:t+1]
-            try:
-                m = SARIMAX(y_tr, order=(1,1,1), seasonal_order=(1,1,1,12),
-                            enforce_stationarity=False, enforce_invertibility=False)
-                r = m.fit(disp=False)
-                p = r.get_forecast(steps=1).predicted_mean
-            except Exception:
-                r = ARIMA(y_tr, order=(1,1,1)).fit()
-                p = r.get_forecast(steps=1).predicted_mean
-            smapes.append(smape(np.expm1(y_te.values), np.expm1(p.values)))
-    smape_last = np.mean(smapes) if smapes else np.nan
+    df_sup = _build_supervised(ts)
+    y = df_sup["y"].values
+    X = df_sup.drop(columns=["y"])
 
-    try:
-        m_full = SARIMAX(y, order=(1,1,1), seasonal_order=(1,1,1,12),
-                         enforce_stationarity=False, enforce_invertibility=False)
-        r_full = m_full.fit(disp=False)
-        pred = r_full.get_forecast(steps=steps)
-        mean = np.expm1(pred.predicted_mean); ci = np.expm1(pred.conf_int(alpha=0.05))
-    except Exception:
-        r_full = ARIMA(y, order=(1,1,1)).fit()
-        pred = r_full.get_forecast(steps=steps)
-        mean = np.expm1(pred.predicted_mean); ci = np.expm1(pred.conf_int(alpha=0.05))
+    val_len = min(eval_months, max(6, int(0.15*len(df_sup))))
+    X_tr, y_tr = X.iloc[:-val_len], y[:-val_len]
+    X_va, y_va = X.iloc[-val_len:], y[-val_len:]
 
+    model = _train_xgb_with_es(X_tr, y_tr, X_va, y_va)
+    y_va_pred = model.predict(X_va)
+    smape_val = smape(y_va, y_va_pred)
+
+    resid_abs = np.abs(y_va - y_va_pred)
+    q975 = np.quantile(resid_abs, 0.975) if len(resid_abs)>0 else 0.0
+
+    last_ts = ts.copy()
     future_idx = pd.date_range(ts.index.max() + pd.offsets.MonthBegin(), periods=steps, freq="MS")
+    preds, lo, hi = [], [], []
+    for d in future_idx:
+        tmp = last_ts.asfreq("MS")
+        # Dataset extendido hasta d para generar lags y rollings
+        ext_idx = tmp.index.append(pd.DatetimeIndex([d]))
+        tmp_ext = tmp.reindex(ext_idx)
+        df_ext = _build_supervised(tmp_ext)
+        # Tomar la última fila (fecha d) sin 'y'
+        X_pred_row = df_ext.loc[df_ext.index == df_ext.index.max()].drop(columns=["y"], errors="ignore")
+        if X_pred_row.empty:
+            X_pred_row = df_ext.tail(1).drop(columns=["y"], errors="ignore")
+        yhat = float(model.predict(X_pred_row)[0])
+        yhat = max(0.0, yhat)
+        preds.append(yhat)
+        lo.append(max(0.0, yhat - q975))
+        hi.append(yhat + q975)
+        last_ts.loc[d] = yhat
+
     hist_acum = ts.cumsum()
-    forecast_acum = np.cumsum(mean) + hist_acum.iloc[-1]
+    forecast_acum = np.cumsum(preds) + (hist_acum.iloc[-1] if len(hist_acum)>0 else 0.0)
 
     fc_df = pd.DataFrame({
         "FECHA": future_idx,
-        "Forecast_mensual": mean.values,
-        "Forecast_acum": forecast_acum.values,
-        "IC_lo": ci.iloc[:,0].values,
-        "IC_hi": ci.iloc[:,1].values
+        "Forecast_mensual": np.array(preds),
+        "Forecast_acum": np.array(forecast_acum),
+        "IC_lo": np.array(lo),
+        "IC_hi": np.array(hi)
     })
-    fc_df["IC_lo"] = fc_df["IC_lo"].clip(lower=0)
-    fc_df["Forecast_mensual"] = fc_df["Forecast_mensual"].clip(lower=0)
 
     hist_df = pd.DataFrame({"FECHA": ts.index, "Mensual": ts.values, "ACUM": hist_acum.values})
-    return hist_df, fc_df, smape_last
+    return hist_df, fc_df, smape_val
 
 def nicer_line(fig: Figure, title: str):
     fig.update_traces(mode="lines+markers", marker=dict(size=7), line=dict(width=2))
@@ -276,10 +346,10 @@ periodos_forecast = st.sidebar.number_input(
 # IPC proyectado 2026
 ipc_2026 = st.sidebar.number_input(
     "IPC proyectado para 2026 (%)", min_value=-5.0, max_value=30.0, value=7.0, step=0.1,
-    help="Aumento esperado de IPC para ajustar el presupuesto sugerido 2026."
+    help="Ajuste automático del presupuesto sugerido 2026."
 )
 
-# Filtro global para vistas; población para forecast (sin restringir años)
+# Filtro global para vistas
 df_sel = df[df['ANIO'].isin(year_sel)].copy()
 if suc != "TODAS" and 'SUCURSAL' in df_sel.columns: df_sel = df_sel[df_sel['SUCURSAL'] == suc]
 if lin != "TODAS" and 'LINEA' in df_sel.columns: df_sel = df_sel[df_sel['LINEA'] == lin]
@@ -313,10 +383,10 @@ with tabs[0]:
       además de pronosticar <b>cierres de año</b> y sugerir el <b>presupuesto 2026</b> con base en el comportamiento mensual histórico.
       <br><br>
       <b>¿Cómo lo hace?</b><br>
-      • <b>SARIMAX</b> (estacionalidad 12) para meses faltantes del año actual y todo 2026.<br>
-      • Limpieza de ceros finales y <b>exclusión del mes actual si está parcial</b> (nowcast) para evitar sesgos a la baja.<br>
-      • <b>Presupuesto 2026</b>: se ajusta automáticamente por el <b>IPC proyectado</b> que defines en el panel lateral (<i>{ipc:.1f}%</i>).<br>
-      • IC 95%, tablas exportables a Excel y modo ejecutivo con escenarios.
+      • Motor <b>XGBoost</b> con lags/rolling y dummies estacionales.<br>
+      • Limpieza de ceros de cola y <b>exclusión del mes actual si está parcial</b> (nowcast) para evitar sesgos a la baja.<br>
+      • <b>Presupuesto 2026</b> ajustado automáticamente por el <b>IPC proyectado</b> (<i>{ipc:.1f}%</i>).<br>
+      • IC 95% por <i>conformal prediction</i>, tablas exportables y modo ejecutivo con escenarios.
       <br><br>
       <i>Nota:</i> Si el mes en curso no está completo (p. ej., septiembre hasta el día 23), se estima con el modelo (nowcast) y se suma al YTD.
     </div>
@@ -326,21 +396,21 @@ with tabs[0]:
 with tabs[1]:
     ref_year = int(df['FECHA'].max().year)
 
-    # 1) Prepara serie y excluye mes actual parcial para entrenar
+    # Serie base y exclusión de mes parcial para entrenar
     base_series = sanitize_trailing_zeros(serie_prima_all.copy(), ref_year)
     serie_train, cur_month_ts, had_partial = split_series_excluding_partial_current(base_series, ref_year)
 
-    # 2) Define meses faltantes según último mes cerrado
+    # Meses faltantes
     if had_partial and cur_month_ts is not None:
         last_closed_month = cur_month_ts.month - 1
     else:
         last_closed_month = last_actual_month_from_df(df_noYear, ref_year)
     meses_faltantes = max(0, 12 - last_closed_month)
 
-    # 3) Entrena y pronostica
-    hist_df, fc_df, smape6 = fit_forecast(serie_train, steps=max(1, meses_faltantes), eval_months=6)
+    # Forecast XGB
+    hist_df, fc_df, smape6 = fit_xgb_forecast(serie_train, steps=max(1, meses_faltantes), eval_months=6)
 
-    # 4) Si hay mes parcial, el primer paso es el nowcast del mes actual
+    # Nowcast del mes actual (si parcial)
     nowcast_actual = None
     if had_partial and not fc_df.empty and cur_month_ts is not None:
         if fc_df.iloc[0]["FECHA"] != cur_month_ts:
@@ -352,17 +422,15 @@ with tabs[1]:
     df_2024 = pd.DataFrame({"FECHA": serie_2024.index, "Mensual_2024": serie_2024.values})
     df_2024["ACUM_2024"] = serie_2024.cumsum().values
 
-    # KPIs con nowcast del mes actual (si aplica)
+    # KPIs
     ytd_cerrado = serie_train[serie_train.index.year == ref_year].sum()
     ytd_ref = ytd_cerrado + (nowcast_actual if nowcast_actual is not None else 0.0)
-
     if had_partial and nowcast_actual is not None and len(fc_df) > 1:
         resto = fc_df['Forecast_mensual'].iloc[1:].sum()
     else:
         resto = fc_df['Forecast_mensual'].sum()
     cierre_ref = ytd_ref + resto
 
-    # Cierre anual 2024
     cierre_2024 = float(serie_2024.sum()) if not serie_2024.empty else 0.0
 
     c1, c2, c3, c4 = st.columns(4)
@@ -382,7 +450,7 @@ with tabs[1]:
 
     # Mensual
     fig_m = px.line(hist_df, x="FECHA", y="Mensual", title="")
-    fig_m = nicer_line(fig_m, "Primas mensuales (histórico) y forecast")
+    fig_m = nicer_line(fig_m, "Primas mensuales (histórico) y forecast (XGBoost)")
     if not fc_df.empty:
         fig_m.add_scatter(x=fc_df["FECHA"], y=fc_df["Forecast_mensual"], name="Forecast (mensual)", mode="lines+markers")
         fig_m.add_scatter(x=fc_df["FECHA"], y=fc_df["IC_lo"], name="IC 95% inf", mode="lines")
@@ -436,9 +504,9 @@ with tabs[1]:
     # Excel
     hist_tbl = hist_df.copy(); hist_tbl["FECHA"] = hist_tbl["FECHA"].dt.strftime("%Y-%m")
     fc_tbl   = fc_df.copy();   fc_tbl["FECHA"] = fc_tbl["FECHA"].dt.strftime("%Y-%m")
-    xls_bytes = to_excel_bytes({"Historico": hist_tbl, f"Forecast {ref_year} completo": fc_tbl})
+    xls_bytes = to_excel_bytes({"Historico": hist_tbl, f"Forecast {ref_year} completo (XGB)": fc_tbl})
     st.download_button("⬇️ Descargar Excel (PRIMAS)", data=xls_bytes,
-                       file_name="primas_forecast.xlsx",
+                       file_name="primas_forecast_xgb.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # --------- TAB PRESUPUESTO 2026 ---------
@@ -463,8 +531,8 @@ with tabs[2]:
         last_closed_month_ref = last_actual_month_from_df(df_noYear, ref_year)
     meses_falt_ref = max(0, 12 - last_closed_month_ref)
 
-    # Pronóstico de ejecución para completar el año
-    _, fc_ref, _ = fit_forecast(serie_exec_clean, steps=max(1, meses_falt_ref))
+    # Pronóstico de ejecución para completar el año (XGB)
+    _, fc_ref, _ = fit_xgb_forecast(serie_exec_clean, steps=max(1, meses_falt_ref))
 
     # Nowcast para el mes actual (si parcial)
     nowcast_ref = None
@@ -473,7 +541,7 @@ with tabs[2]:
             fc_ref.iloc[0, fc_ref.columns.get_loc("FECHA")] = cur_m_ref
         nowcast_ref = float(fc_ref.iloc[0]["Forecast_mensual"])
 
-    # Ejecutado YTD = cerrados + nowcast de mes actual (si aplica)
+    # Ejecutado YTD = cerrados + nowcast
     ytd_ejec_cerrado = serie_exec_clean[serie_exec_clean.index.year == ref_year].sum()
     ytd_ejec = ytd_ejec_cerrado + (nowcast_ref if nowcast_ref is not None else 0.0)
 
@@ -498,7 +566,7 @@ with tabs[2]:
     # Serie mensual comparativa: Presupuesto vs Ejecutado (con nowcast) + proyección
     comp_ref = pd.DataFrame(index=pd.date_range(f"{ref_year}-01-01", f"{ref_year}-12-01", freq="MS"))
     comp_ref["Presupuesto"] = pres_ref.reindex(comp_ref.index) if not pres_ref.empty else np.nan
-    ejec_mes = serie_exec_clean.reindex(comp_ref.index)  # meses cerrados
+    ejec_mes = serie_exec_clean.reindex(comp_ref.index)  # cerrados
     if had_partial_ref and cur_m_ref in comp_ref.index and nowcast_ref is not None:
         ejec_mes.loc[cur_m_ref] = nowcast_ref
     comp_ref["Ejecutado"] = ejec_mes
@@ -517,7 +585,7 @@ with tabs[2]:
     figp = nicer_line(figp, f"{ref_year}: Presupuesto vs Ejecutado (con nowcast) y proyección")
     st.plotly_chart(figp, use_container_width=True)
 
-    # Sugerido 2026 (modelo) + ajuste IPC (usando serie robusta; fallback si pocos datos)
+    # Sugerido 2026 (XGB) + IPC
     serie_exec_clean_local = serie_exec_clean.copy()
     if len(serie_exec_clean_local.dropna()) < 18:
         st.info("Muestra filtrada corta: usamos comportamiento global como referencia para 2026.")
@@ -525,7 +593,7 @@ with tabs[2]:
         serie_exec_clean_local = sanitize_trailing_zeros(serie_exec_global, ref_year)
 
     pasos_total = max(1, meses_falt_ref) + 12
-    _, fc_ext, _ = fit_forecast(serie_exec_clean_local, steps=pasos_total, eval_months=6)
+    _, fc_ext, _ = fit_xgb_forecast(serie_exec_clean_local, steps=pasos_total, eval_months=6)
     sug_2026 = fc_ext.tail(12).set_index("FECHA"); sug_2026.index = pd.date_range("2026-01-01","2026-12-01",freq="MS")
 
     base_2026 = sug_2026["Forecast_mensual"].round(0).astype(int)
@@ -549,7 +617,7 @@ with tabs[2]:
     p2026_tbl = presupuesto_2026_df.copy(); p2026_tbl["FECHA"] = p2026_tbl["FECHA"].dt.strftime("%Y-%m")
     xls_pres = to_excel_bytes({f"{ref_year} Pres vs Ejec (nowcast)": comp_ref_tbl, f"2026 Presupuesto (IPC {ipc_2026:.1f}%)": p2026_tbl})
     st.download_button("⬇️ Descargar Excel (PRESUPUESTO)", data=xls_pres,
-                       file_name="presupuesto_refyear_y_2026_ipc.xlsx",
+                       file_name="presupuesto_refyear_y_2026_ipc_xgb.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # --------- TAB MODO DIRECTOR BI ---------
@@ -576,7 +644,7 @@ with tabs[3]:
             show_df(base_26[["FECHA",base_col,"Escenario ajustado 2026"]], key="escenario26")
             xls_dir = to_excel_bytes({"2026_con_IPC_vs_ajustado": base_26.assign(FECHA=base_26["FECHA"].dt.strftime("%Y-%m"))})
             st.download_button("⬇️ Descargar Excel (Modo Director - 2026)", data=xls_dir,
-                               file_name="modo_director_2026.xlsx",
+                               file_name="modo_director_2026_xgb.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     with colB:
@@ -626,11 +694,11 @@ with tabs[3]:
     st.markdown("---")
     try:
         yref = int(df['FECHA'].max().year)
-        # Recalcular cierre ref con nowcast coherente
+        # Recalcular cierre ref con nowcast coherente (XGB)
         base_series2 = sanitize_trailing_zeros(serie_prima_all.copy(), yref)
         serie_train2, cur_ts2, had_part2 = split_series_excluding_partial_current(base_series2, yref)
         falt2 = max(0, 12 - (cur_ts2.month - 1 if had_part2 and cur_ts2 is not None else last_actual_month_from_df(df_noYear, yref)))
-        _, fc_tmp2, _ = fit_forecast(serie_train2, steps=max(1, falt2))
+        _, fc_tmp2, _ = fit_xgb_forecast(serie_train2, steps=max(1, falt2))
         if had_part2 and cur_ts2 is not None and len(fc_tmp2)>0:
             if fc_tmp2.iloc[0]["FECHA"] != cur_ts2:
                 fc_tmp2.iloc[0, fc_tmp2.columns.get_loc("FECHA")] = cur_ts2
