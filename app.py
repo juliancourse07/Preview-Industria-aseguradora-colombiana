@@ -1,4 +1,4 @@
-# app.py  — AseguraView con XGBoost (forecast + nowcast mes parcial + IPC 2026)
+# app.py  — AseguraView con XGBoost robusto (nowcast mes parcial + IPC 2026)
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -10,8 +10,6 @@ from plotly.graph_objs import Figure
 from io import BytesIO
 
 # ===== XGBoost / ML =====
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import mean_absolute_error
 import xgboost as xgb
 
 # ============ CONFIG ============
@@ -51,7 +49,7 @@ body {background: radial-gradient(1200px 800px at 10% 10%, #0b1220 0%, #0a0f1a 4
 <div class="glow"></div>
 """, unsafe_allow_html=True)
 
-# Sonido futurista (autoplay depende del navegador)
+# Sonido de entrada (autoplay depende del navegador)
 st.markdown("""
 <audio id="intro-audio" src="https://cdn.pixabay.com/download/audio/2024/01/09/audio_ee3a8b2b42.mp3?filename=futuristic-digital-sweep-168473.mp3"></audio>
 <script>
@@ -80,7 +78,7 @@ st.title("AseguraView · Primas & Presupuesto")
 st.caption("Forecast mensual (XGBoost), nowcast del mes en curso, cierre estimado 2025 y presupuesto sugerido 2026 (con IPC), por Año / Sucursal / Línea / Compañía.")
 
 # ============ DATOS ============
-SHEET_ID = "1ThVwW3IbkL7Dw_Vrs9heT1QMiHDZw1Aj-n0XNbDi9i8"   # <-- cambia si usas otro
+SHEET_ID = "1ThVwW3IbkL7Dw_Vrs9heT1QMiHDZw1Aj-n0XNbDi9i8"   # <-- ajusta si usas otro
 SHEET_NAME_DATOS = "Hoja1"
 
 def gsheet_csv(sheet_id, sheet_name):
@@ -144,102 +142,146 @@ def split_series_excluding_partial_current(ts: pd.Series, ref_year: int):
         return ts.dropna(), cur_m, True
     return ts.dropna(), None, False
 
-# ======= XGBoost feature engineering & forecast =======
+# ======= XGBoost (robusto) =======
 def _make_features_from_index(idx: pd.DatetimeIndex) -> pd.DataFrame:
     dfX = pd.DataFrame(index=idx)
-    dfX["year"] = dfX.index.year
-    dfX["month"] = dfX.index.month
-    dfX = pd.get_dummies(dfX, columns=["month"], prefix="m", drop_first=False)
-    dfX["t"] = np.arange(len(dfX))
+    dfX["year"] = dfX.index.year.astype(np.int16)
+    dfX["month"] = dfX.index.month.astype(np.int8)
+
+    dummies = pd.get_dummies(dfX["month"], prefix="m")
+    for m in range(1, 13):
+        col = f"m_{m}"
+        if col not in dummies.columns:
+            dummies[col] = 0
+    dummies = dummies[[f"m_{m}" for m in range(1, 13)]].astype(np.int8)
+
+    dfX = pd.concat([dfX.drop(columns=["month"]), dummies], axis=1)
+    dfX["t"] = np.arange(len(dfX), dtype=np.int32)
     return dfX
 
 def _build_supervised(ts: pd.Series, lags=(1,2,3,6,12), rolls=(3,6,12)) -> pd.DataFrame:
+    ts = ensure_monthly(ts.copy())
     df = ts.to_frame("y")
+
+    if len(df) < (max(lags) + 6):
+        return pd.DataFrame()
+
     for L in lags:
         df[f"lag_{L}"] = df["y"].shift(L)
+
     for W in rolls:
-        df[f"roll_mean_{W}"] = df["y"].shift(1).rolling(W, min_periods=max(2, int(W/2))).mean()
-        df[f"roll_std_{W}"]  = df["y"].shift(1).rolling(W, min_periods=max(2, int(W/2))).std()
+        rmean = df["y"].shift(1).rolling(W, min_periods=max(2, W//2)).mean()
+        rstd  = df["y"].shift(1).rolling(W, min_periods=max(2, W//2)).std()
+        df[f"roll_mean_{W}"] = rmean
+        df[f"roll_std_{W}"]  = rstd
+
     Xcal = _make_features_from_index(df.index)
     df = df.join(Xcal)
-    df = df.dropna()
-    return df
 
-def _train_xgb_with_es(X_train, y_train, X_val, y_val):
-    model = xgb.XGBRegressor(
-        n_estimators=2000,
-        learning_rate=0.02,
-        max_depth=6,
-        subsample=0.9,
-        colsample_bytree=0.9,
-        reg_lambda=1.0,
-        objective="reg:squarederror",
-        random_state=42,
-        tree_method="hist"
-    )
-    model.fit(
-        X_train, y_train,
-        eval_set=[(X_val, y_val)],
-        verbose=False,
-        early_stopping_rounds=100
-    )
-    return model
+    df = df.dropna()
+    for c in df.columns:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna()
+    return df.astype(np.float32)
 
 def fit_xgb_forecast(ts_m: pd.Series, steps: int, eval_months:int=6):
     """
-    Pronóstico con XGBoost:
-      - Lags (1,2,3,6,12), rolling (3,6,12), dummies de mes y tendencia.
-      - Validación temporal (últimos eval_months) para early stopping + sMAPE.
-      - Intervalos por Conformal Prediction (cuantil 97.5% de residuales absolutos).
+    XGBoost con:
+      - lags/rollings + dummies mes + tendencia
+      - validación temporal robusta (si no alcanza, entrena sin early stopping)
+      - conformal PI
+      - fallback estacional si la muestra es corta tras filtros
     """
-    if steps < 1: steps = 1
-    ts = ensure_monthly(ts_m.copy())
-    if len(ts.dropna()) < 18:
-        # Pocos datos -> fallback: media por mes
-        future_idx = pd.date_range(ts.index.max() + pd.offsets.MonthBegin(), periods=steps, freq="MS")
-        by_month = ts.groupby(ts.index.month).mean()
-        preds = np.array([max(0.0, by_month.get(m, ts.mean())) for m in future_idx.month])
-        hist_acum = ts.cumsum()
+    if steps < 1:
+        steps = 1
+
+    ts = ensure_monthly(ts_m.copy()).astype(np.float32)
+
+    def _fallback(ts_local: pd.Series):
+        future_idx = pd.date_range(ts_local.index.max() + pd.offsets.MonthBegin(),
+                                   periods=steps, freq="MS")
+        by_month = ts_local.groupby(ts_local.index.month).mean()
+        preds = np.array([max(0.0, float(by_month.get(m, ts_local.mean()))) for m in future_idx.month],
+                         dtype=np.float32)
+        hist_acum = ts_local.cumsum()
         forecast_acum = np.cumsum(preds) + (hist_acum.iloc[-1] if len(hist_acum)>0 else 0.0)
         fc_df = pd.DataFrame({
             "FECHA": future_idx,
             "Forecast_mensual": preds,
-            "Forecast_acum": forecast_acum,
+            "Forecast_acum": forecast_acum.astype(np.float32),
             "IC_lo": np.maximum(0, preds*0.85),
             "IC_hi": preds*1.15
         })
-        hist_df = pd.DataFrame({"FECHA": ts.index, "Mensual": ts.values, "ACUM": hist_acum.values})
+        hist_df = pd.DataFrame({"FECHA": ts_local.index, "Mensual": ts_local.values, "ACUM": hist_acum.values})
         return hist_df, fc_df, np.nan
 
     df_sup = _build_supervised(ts)
-    y = df_sup["y"].values
-    X = df_sup.drop(columns=["y"])
+    if df_sup.empty or len(df_sup) < 24:
+        return _fallback(ts)
 
-    val_len = min(eval_months, max(6, int(0.15*len(df_sup))))
-    X_tr, y_tr = X.iloc[:-val_len], y[:-val_len]
-    X_va, y_va = X.iloc[-val_len:], y[-val_len:]
+    y = df_sup["y"].values.astype(np.float32)
+    X = df_sup.drop(columns=["y"]).astype(np.float32)
+    n = len(X)
 
-    model = _train_xgb_with_es(X_tr, y_tr, X_va, y_va)
-    y_va_pred = model.predict(X_va)
-    smape_val = smape(y_va, y_va_pred)
+    val_len = min(max(6, int(0.15*n)), n//3)
+    if n - val_len < 12:
+        val_len = max(3, n//5)
+    use_es = val_len >= 3
 
-    resid_abs = np.abs(y_va - y_va_pred)
-    q975 = np.quantile(resid_abs, 0.975) if len(resid_abs)>0 else 0.0
+    if use_es:
+        X_tr, y_tr = X.iloc[:-val_len], y[:-val_len]
+        X_va, y_va = X.iloc[-val_len:], y[-val_len:]
+    else:
+        X_tr, y_tr = X, y
+        X_va, y_va = None, None
+
+    model = xgb.XGBRegressor(
+        n_estimators=1600,
+        learning_rate=0.03,
+        max_depth=6,
+        subsample=0.9,
+        colsample_bytree=0.9,
+        reg_lambda=1.2,
+        objective="reg:squarederror",
+        random_state=42,
+        tree_method="hist"
+    )
+
+    if use_es:
+        model.fit(
+            X_tr, y_tr,
+            eval_set=[(X_va, y_va)],
+            verbose=False,
+            early_stopping_rounds=100
+        )
+        y_va_pred = model.predict(X_va)
+        smape_val = smape(y_va, y_va_pred)
+        resid_abs = np.abs(y_va - y_va_pred)
+        q975 = float(np.quantile(resid_abs, 0.975)) if len(resid_abs) else 0.0
+    else:
+        model.fit(X_tr, y_tr, verbose=False)
+        smape_val = np.nan
+        q975 = 0.0
+
+    feature_cols = list(X.columns)
 
     last_ts = ts.copy()
     future_idx = pd.date_range(ts.index.max() + pd.offsets.MonthBegin(), periods=steps, freq="MS")
     preds, lo, hi = [], [], []
+
     for d in future_idx:
         tmp = last_ts.asfreq("MS")
-        # Dataset extendido hasta d para generar lags y rollings
         ext_idx = tmp.index.append(pd.DatetimeIndex([d]))
         tmp_ext = tmp.reindex(ext_idx)
+
         df_ext = _build_supervised(tmp_ext)
-        # Tomar la última fila (fecha d) sin 'y'
-        X_pred_row = df_ext.loc[df_ext.index == df_ext.index.max()].drop(columns=["y"], errors="ignore")
-        if X_pred_row.empty:
-            X_pred_row = df_ext.tail(1).drop(columns=["y"], errors="ignore")
-        yhat = float(model.predict(X_pred_row)[0])
+        if df_ext.empty:
+            yhat = float((tmp.tail(12).mean() if len(tmp) else 0.0))
+        else:
+            X_pred_row = df_ext.iloc[[-1]].drop(columns=["y"], errors="ignore")
+            X_pred_row = X_pred_row.reindex(columns=feature_cols, fill_value=0).astype(np.float32)
+            yhat = float(model.predict(X_pred_row)[0])
+
         yhat = max(0.0, yhat)
         preds.append(yhat)
         lo.append(max(0.0, yhat - q975))
@@ -247,16 +289,15 @@ def fit_xgb_forecast(ts_m: pd.Series, steps: int, eval_months:int=6):
         last_ts.loc[d] = yhat
 
     hist_acum = ts.cumsum()
-    forecast_acum = np.cumsum(preds) + (hist_acum.iloc[-1] if len(hist_acum)>0 else 0.0)
+    forecast_acum = np.cumsum(preds) + (hist_acum.iloc[-1] if len(hist_acum) else 0.0)
 
     fc_df = pd.DataFrame({
         "FECHA": future_idx,
-        "Forecast_mensual": np.array(preds),
-        "Forecast_acum": np.array(forecast_acum),
-        "IC_lo": np.array(lo),
-        "IC_hi": np.array(hi)
+        "Forecast_mensual": np.array(preds, dtype=np.float32),
+        "Forecast_acum": np.array(forecast_acum, dtype=np.float32),
+        "IC_lo": np.array(lo, dtype=np.float32),
+        "IC_hi": np.array(hi, dtype=np.float32)
     })
-
     hist_df = pd.DataFrame({"FECHA": ts.index, "Mensual": ts.values, "ACUM": hist_acum.values})
     return hist_df, fc_df, smape_val
 
@@ -267,7 +308,6 @@ def nicer_line(fig: Figure, title: str):
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         margin=dict(l=20, r=20, t=60, b=20)
     )
-    # Rangeslider
     fig.update_xaxes(rangeslider_visible=True)
     for tr in fig.data:
         tr.hovertemplate = "%{x|%b-%Y}<br>%{y:,.0f}<extra></extra>"
@@ -407,7 +447,7 @@ with tabs[1]:
         last_closed_month = last_actual_month_from_df(df_noYear, ref_year)
     meses_faltantes = max(0, 12 - last_closed_month)
 
-    # Forecast XGB
+    # Forecast XGB robusto
     hist_df, fc_df, smape6 = fit_xgb_forecast(serie_train, steps=max(1, meses_faltantes), eval_months=6)
 
     # Nowcast del mes actual (si parcial)
@@ -479,7 +519,6 @@ with tabs[1]:
     if meses_faltantes > 0:
         meses_mostrar = st.slider(f"Meses a listar (faltantes de {ref_year}):", 1, meses_faltantes, min(6, meses_faltantes))
         sel = fc_df.head(meses_mostrar).copy()
-        # Mismo mes 2024
         serie_2024_idx = serie_2024.copy()
         mismo_mes_2024 = []
         for d in sel["FECHA"]:
@@ -654,7 +693,7 @@ with tabs[3]:
         perc = st.select_slider("Rango de sensibilidad", options=[5,10,15,20,25,30], value=10)
         if 'presupuesto_2026_df' in locals() and not presupuesto_2026_df.empty:
             base_26 = presupuesto_2026_df.copy()
-            base_col = base_26.columns[2]  # Ajuste IPC
+            base_col = base_26.columns[2]
             up = int((base_26[base_col]*(1+perc/100)).sum())
             dn = int((base_26[base_col]*(1-perc/100)).sum())
             bench = int(base_26[base_col].sum())
@@ -694,7 +733,6 @@ with tabs[3]:
     st.markdown("---")
     try:
         yref = int(df['FECHA'].max().year)
-        # Recalcular cierre ref con nowcast coherente (XGB)
         base_series2 = sanitize_trailing_zeros(serie_prima_all.copy(), yref)
         serie_train2, cur_ts2, had_part2 = split_series_excluding_partial_current(base_series2, yref)
         falt2 = max(0, 12 - (cur_ts2.month - 1 if had_part2 and cur_ts2 is not None else last_actual_month_from_df(df_noYear, yref)))
