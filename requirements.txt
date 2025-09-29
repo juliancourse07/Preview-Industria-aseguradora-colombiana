@@ -2,10 +2,13 @@ streamlit
 pandas
 numpy
 plotly
-statsmodels
-openpyxl
 xgboost
 scikit-learn
+openpyxl
+pillow
+xlrd
+pyarrow
+
 
 
 
