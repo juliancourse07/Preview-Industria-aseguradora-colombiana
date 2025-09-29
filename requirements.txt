@@ -7,5 +7,6 @@ openpyxl
 pillow
 xlrd
 pyarrow
+xgboost
 
 
