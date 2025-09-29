@@ -5,6 +5,9 @@ plotly
 statsmodels
 openpyxl
 xgboost
+scikit-learn
+setuptools
+wheel
 
 
 
