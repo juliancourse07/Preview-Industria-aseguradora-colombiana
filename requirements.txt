@@ -2,11 +2,10 @@ streamlit
 pandas
 numpy
 plotly
-xgboost
+scikit-learn
 openpyxl
 pillow
 pyarrow
-
 
 
 
