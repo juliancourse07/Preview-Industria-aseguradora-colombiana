@@ -232,7 +232,7 @@ def load_datos(url_csv: str) -> pd.DataFrame:
         'Compañía':'COMPANIA','COMPAÑÍA':'COMPANIA','COMPANIA':'COMPANIA',
         'Imp Prima':'IMP_PRIMA','Imp Prima Cuota':'IMP_PRIMA_CUOTA'
     }
-    df = df.rename(columns={k:v for k,v in rename_map.items() if k in df.columns])
+    df = df.rename(columns={k:v for k,v in rename_map.items() if k in df.columns})
     if 'MES_TXT' in df.columns:
         df['FECHA'] = pd.to_datetime(df['MES_TXT'], dayfirst=True, errors='coerce')
     else:
