@@ -10,6 +10,10 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.arima.model import ARIMA
 from io import BytesIO
 
+def safe_int(series):
+    # Convierte NaN, inf y -inf a 0 antes de pasar a int
+    return pd.Series(series).replace([np.nan, np.inf, -np.inf], 0).round(0).astype(int)
+
 # ============ CONFIG ============
 st.set_page_config(
     page_title="AseguraView · Primas & Presupuesto",
@@ -345,7 +349,8 @@ with tabs[1]:
     proy_linea = {}
     for _, row in fc_df.iterrows():
         fecha = row["FECHA"].strftime("%b-%Y")
-        proy_linea[fecha] = (row["Forecast_mensual"] * prop).round(0).fillna(0).astype(int)
+        # safe_int para cada columna por línea
+        proy_linea[fecha] = safe_int(row["Forecast_mensual"] * prop)
     cierre_linea_mes_faltantes = pd.DataFrame(proy_linea).T.fillna(0).astype(int)
     st.dataframe(cierre_linea_mes_faltantes, use_container_width=True, hide_index=False)
     st.caption(f"Se muestran los meses faltantes de {ref_year} (incluyendo diciembre) y la proyección por línea.")
@@ -358,9 +363,9 @@ with tabs[1]:
     sel = fc_df.head(meses_mostrar).copy()
     tabla_faltantes = pd.DataFrame({
         "Mes": sel["FECHA"].dt.strftime("%b-%Y"),
-        "Proyección": sel["Forecast_mensual"].round(0).fillna(0).astype(int),
-        "IC 95% inf": sel["IC_lo"].round(0).fillna(0).astype(int),
-        "IC 95% sup": sel["IC_hi"].round(0).fillna(0).astype(int),
+        "Proyección": safe_int(sel["Forecast_mensual"]),
+        "IC 95% inf": safe_int(sel["IC_lo"]),
+        "IC 95% sup": safe_int(sel["IC_hi"]),
     })
     show_df(tabla_faltantes, money_cols=["Proyección","IC 95% inf","IC 95% sup"], key="faltantes_2025")
     st.caption(f"Siempre se muestra hasta diciembre. Si hay datos reales solo hasta septiembre, octubre-diciembre son estimados.")
@@ -441,16 +446,16 @@ with tabs[2]:
     _, fc_ext, _ = fit_forecast(serie_exec_clean_local, steps=pasos_total, eval_months=6)
     sug_2026 = fc_ext.tail(12).set_index("FECHA"); sug_2026.index = pd.date_range("2026-01-01","2026-12-01",freq="MS")
 
-    base_2026 = sug_2026["Forecast_mensual"].round(0).fillna(0).astype(int)
+    base_2026 = safe_int(sug_2026["Forecast_mensual"])
     ipc_factor = 1 + (ipc_2026/100.0)
-    ajustado_2026 = (base_2026 * ipc_factor).round(0).fillna(0).astype(int)
+    ajustado_2026 = safe_int(base_2026 * ipc_factor)
 
     presupuesto_2026_df = pd.DataFrame({
         "FECHA": base_2026.index,
         "Sugerido modelo 2026": base_2026.values,
         f"Ajuste IPC {ipc_2026:.1f}%": ajustado_2026.values,
-        "IC 95% inf": sug_2026["IC_lo"].round(0).fillna(0).astype(int).values,
-        "IC 95% sup": sug_2026["IC_hi"].round(0).fillna(0).astype(int).values
+        "IC 95% inf": safe_int(sug_2026["IC_lo"]).values,
+        "IC 95% sup": safe_int(sug_2026["IC_hi"]).values
     })
     total_base = int(base_2026.sum())
     total_ajust = int(ajustado_2026.sum())
@@ -480,7 +485,7 @@ with tabs[3]:
         else:
             base_26 = presupuesto_2026_df.copy()
             base_col = base_26.columns[2]
-            base_26["Escenario ajustado 2026"] = (base_26[base_col]*(1+ajuste_pct/100)).round(0).fillna(0).astype(int)
+            base_26["Escenario ajustado 2026"] = safe_int(base_26[base_col]*(1+ajuste_pct/100))
             total_base = int(base_26[base_col].sum())
             total_adj  = int(base_26["Escenario ajustado 2026"].sum())
             c1,c2 = st.columns(2)
@@ -525,7 +530,7 @@ with tabs[3]:
             if not outliers.empty:
                 alert = pd.DataFrame({
                     "Fecha": outliers.index.strftime("%b-%Y"),
-                    "Valor": s.loc[outliers.index].astype(int).values,
+                    "Valor": safe_int(s.loc[outliers.index]).values,
                     "Desviación": outliers.round(2).values
                 }).sort_index()
                 show_df(alert, money_cols=["Valor"], key="anomalias")
