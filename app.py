@@ -10,10 +10,6 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.arima.model import ARIMA
 from io import BytesIO
 
-def safe_int(series):
-    # Convierte NaN, inf y -inf a 0 antes de pasar a int
-    return pd.Series(series).replace([np.nan, np.inf, -np.inf], 0).round(0).astype(int)
-
 # ============ CONFIG ============
 st.set_page_config(
     page_title="AseguraView · Primas & Presupuesto",
@@ -35,6 +31,7 @@ body {background: radial-gradient(1200px 800px at 10% 10%, #0b1220 0%, #0a0f1a 4
 .glow {position: fixed; inset: auto auto 20px 20px; width: 220px; height: 220px;
        background: radial-gradient(closest-side at 50% 50%, rgba(59,130,246,.28), rgba(59,130,246,0));
        filter: blur(20px); pointer-events: none; z-index: 0; opacity:.6;}
+/* Tooltips (CSS-only) */
 .badge{display:inline-block;position:relative;margin-left:6px}
 .badge.right{margin-left:0;margin-right:6px}
 .badge > .q{cursor:help;color:#93c5fd;font-weight:700}
@@ -50,6 +47,7 @@ body {background: radial-gradient(1200px 800px at 10% 10%, #0b1220 0%, #0a0f1a 4
 <div class="glow"></div>
 """, unsafe_allow_html=True)
 
+# Sonido futurista (intento de autoplay – puede depender del navegador)
 st.markdown("""
 <audio id="intro-audio" src="https://cdn.pixabay.com/download/audio/2024/01/09/audio_ee3a8b2b42.mp3?filename=futuristic-digital-sweep-168473.mp3"></audio>
 <script>
@@ -59,6 +57,7 @@ st.markdown("""
 </script>
 """, unsafe_allow_html=True)
 
+# ======= BRANDING =======
 LOGO_URL = "https://d7nxjt1whovz0.cloudfront.net/marketplace/logos/divisions/seguros-de-vida-del-estado.png"
 HERO_URL = "https://images.unsplash.com/photo-1556157382-97eda2d62296?q=80&w=2400&auto=format&fit=crop"
 
@@ -74,7 +73,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 st.title("AseguraView · Primas & Presupuesto")
-st.caption("Forecast mensual (SARIMAX), nowcast, cierre estimado 2025 y presupuesto sugerido 2026 (con IPC), por Sucursal / Línea / Compañía.")
+st.caption("Forecast mensual (SARIMAX), nowcast del mes en curso, cierre estimado 2025 y presupuesto sugerido 2026 (con IPC), por Sucursal / Línea / Compañía.")
 
 # ============ DATOS ============
 SHEET_ID = "1ThVwW3IbkL7Dw_Vrs9heT1QMiHDZw1Aj-n0XNbDi9i8"
@@ -83,6 +82,7 @@ SHEET_NAME_DATOS = "Hoja1"
 def gsheet_csv(sheet_id, sheet_name):
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
 
+# ============ HELPERS ============
 def info_badge(texto:str, right:bool=False) -> str:
     cls = "badge right" if right else "badge"
     return f'<span class="{cls}"><span class="q">❓</span><span class="tip">{texto}</span></span>'
@@ -219,6 +219,7 @@ def show_df(df, money_cols=None, index=False, key=None):
     for c in money_cols: d[c] = d[c].map(fmt_cop)
     st.dataframe(d, use_container_width=True, hide_index=not index, key=key)
 
+# ============ CARGA ============
 @st.cache_data(show_spinner=False)
 def load_datos(url_csv: str) -> pd.DataFrame:
     df = pd.read_csv(url_csv)
@@ -253,6 +254,7 @@ def load_datos(url_csv: str) -> pd.DataFrame:
 
 df = load_datos(gsheet_csv(SHEET_ID, SHEET_NAME_DATOS))
 
+# ============ FILTROS ============
 st.sidebar.header("Filtros")
 suc_opts  = ["TODAS"] + sorted(df['SUCURSAL'].dropna().unique()) if 'SUCURSAL' in df.columns else ["TODAS"]
 linea_opts= ["TODAS"] + sorted(df['LINEA'].dropna().unique())    if 'LINEA' in df.columns else ["TODAS"]
@@ -283,6 +285,7 @@ if serie_prima_all.empty:
     st.warning("No hay datos de IMP_PRIMA con los filtros seleccionados."); st.stop()
 ultimo_anio_datos = int(df['FECHA'].max().year)
 
+# ============ TABS ============
 tabs = st.tabs(["🏠 Presentación", "📈 Primas (forecast & cierre)", "🧭 Presupuesto 2026", "🧠 Modo Director BI"])
 
 # --------- TAB PRESENTACIÓN ---------
@@ -291,7 +294,7 @@ with tabs[0]:
     st.markdown("""
     <div class="glass" style="padding:18px; line-height:1.5;">
       <b>¿Qué es?</b><br>
-      <b>AseguraView</b> es el tablero corporativo para visualizar <b>Primas</b> y comparar la <b>ejecución vs presupuesto</b>,
+      AseguraView es el tablero corporativo para visualizar <b>Primas</b> y comparar la <b>ejecución vs presupuesto</b>,
       además de pronosticar <b>cierres de año</b> y sugerir el <b>presupuesto 2026</b> con base en el comportamiento mensual histórico.
       <br><br>
       <b>¿Cómo lo hace?</b><br>
@@ -307,84 +310,123 @@ with tabs[0]:
 # --------- TAB PRIMAS (forecast & cierre) ---------
 with tabs[1]:
     ref_year = int(df['FECHA'].max().year)
-    base_series = sanitize_trailing_zeros(serie_prima_all.copy(), ref_year)
-    today = pd.Timestamp.today()
-    df_closed_months = df_noYear[(df_noYear['FECHA'].dt.year == ref_year) & (df_noYear['IMP_PRIMA'] > 0)].copy()
-    ultimo_mes_cerrado = int(df_closed_months['FECHA'].dt.month.max())
-    meses_faltantes = 12 - ultimo_mes_cerrado
-    serie_cerrada = serie_prima_all[serie_prima_all.index.year == ref_year]
-    serie_cerrada = serie_cerrada[serie_cerrada.index.month <= ultimo_mes_cerrado]
-    prod_2025 = float(serie_cerrada.sum())
 
-    hist_df, fc_df, smape6 = fit_forecast(serie_cerrada, steps=meses_faltantes, eval_months=6)
-    meses_faltantes_idx = pd.date_range(
-        pd.Timestamp(year=ref_year, month=ultimo_mes_cerrado+1, day=1),
-        pd.Timestamp(year=ref_year, month=12, day=1),
-        freq="MS"
-    )
-    fc_df = fc_df.copy()
-    fc_df = fc_df[fc_df["FECHA"].isin(meses_faltantes_idx)]
+    base_series = sanitize_trailing_zeros(serie_prima_all.copy(), ref_year)
+    serie_train, cur_month_ts, had_partial = split_series_excluding_partial_current(base_series, ref_year)
+
+    if had_partial and cur_month_ts is not None:
+        last_closed_month = cur_month_ts.month - 1
+    else:
+        last_closed_month = last_actual_month_from_df(df_noYear, ref_year)
+    meses_faltantes = max(0, 12 - last_closed_month)
+
+    hist_df, fc_df, smape6 = fit_forecast(serie_train, steps=max(1, meses_faltantes), eval_months=6)
 
     nowcast_actual = None
-    if (today.month == ultimo_mes_cerrado + 1) and (today.day < 28) and len(fc_df) > 0:
+    if had_partial and not fc_df.empty and cur_month_ts is not None:
+        if fc_df.iloc[0]["FECHA"] != cur_month_ts:
+            fc_df.iloc[0, fc_df.columns.get_loc("FECHA")] = cur_month_ts
         nowcast_actual = float(fc_df.iloc[0]["Forecast_mensual"])
 
-    cierre_est = prod_2025 + fc_df['Forecast_mensual'].sum()
+    serie_2024 = ensure_monthly(serie_prima_all[serie_prima_all.index.year == 2024])
+    df_2024 = pd.DataFrame({"FECHA": serie_2024.index, "Mensual_2024": serie_2024.values})
+    df_2024["ACUM_2024"] = serie_2024.cumsum().values
 
-    c1, c2 = st.columns(2)
-    c1.metric(
-        f"Producción {ref_year} (meses cerrados)",
-        fmt_cop(prod_2025),
-        help=f"Corresponde a la suma de los meses cerrados: enero a {pd.Timestamp(year=ref_year, month=ultimo_mes_cerrado, day=1).strftime('%B')}"
+    prod_2025 = serie_train[serie_train.index.year == ref_year].sum()
+    ytd_ref = prod_2025 + (nowcast_actual if nowcast_actual is not None else 0.0)
+    if had_partial and nowcast_actual is not None and len(fc_df) > 1:
+        resto = fc_df['Forecast_mensual'].iloc[1:].sum()
+    else:
+        resto = fc_df['Forecast_mensual'].sum()
+    cierre_ref = ytd_ref + resto
+    cierre_2024 = float(serie_2024.sum()) if not serie_2024.empty else 0.0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Producción 2025 " + info_badge("Corresponde a la suma de meses cerrados (mes completo más reciente, sin forecast)."), fmt_cop(prod_2025))
+    c2.metric("Cierre estimado 2025", fmt_cop(cierre_ref))
+    c3.metric("Cierre anual 2024", fmt_cop(cierre_2024))
+    c4.metric("SMAPE validación " + info_badge("¿Qué es SMAPE? Es el error porcentual medio simétrico en la validación rolling de 6 meses."), f"{smape6:.2f}%" if not np.isnan(smape6) else "?")
+
+    st.markdown("#### Comparativo rápido: 2024 vs cierre estimado 2025 " + info_badge("Compara el cierre real 2024 con el estimado 2025 para contexto de crecimiento/caída."), unsafe_allow_html=True)
+    comp_bar = pd.DataFrame({"Año": ["2024", "Est. 2025"], "Valor": [cierre_2024, cierre_ref]})
+    fig_comp = px.bar(comp_bar, x="Año", y="Valor", text="Valor")
+    fig_comp.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
+    fig_comp.update_layout(yaxis_title="COP", xaxis_title=None, margin=dict(l=10, r=10, t=20, b=20), showlegend=False)
+    fig_comp.update_xaxes(rangeslider_visible=False)
+    st.plotly_chart(fig_comp, use_container_width=True)
+
+    # ---- TABLA: cierre proyectado de las líneas por mes ----
+    st.markdown("##### Proyección mensual por Línea " + info_badge("Cierre estimado de cada línea por mes en 2025 (basado en forecast)."), unsafe_allow_html=True)
+    df_lines = df_noYear[df_noYear['FECHA'].dt.year == ref_year].copy()
+    cierre_linea_mes = (
+        df_lines
+        .groupby([df_lines['FECHA'].dt.strftime("%b-%Y"), "LINEA"])["IMP_PRIMA"].sum().unstack(fill_value=0)
     )
-    c2.metric("Cierre estimado "+str(ref_year), fmt_cop(cierre_est))
+    if meses_faltantes > 0 and "Forecast_mensual" in fc_df.columns:
+        ult_mes = df_lines['FECHA'].max()
+        ult12_ini = ult_mes - pd.DateOffset(months=11)
+        prop = df_noYear[
+            (df_noYear['FECHA'] >= ult12_ini) &
+            (df_noYear['FECHA'] <= ult_mes)
+        ].groupby("LINEA")["IMP_PRIMA"].sum()
+        if not prop.empty: prop = prop / prop.sum()
+        else: prop = pd.Series(1, index=cierre_linea_mes.columns) / len(cierre_linea_mes.columns)
+        for i, row in fc_df.iterrows():
+            fecha = row["FECHA"].strftime("%b-%Y")
+            cierre_linea_mes.loc[fecha] = row["Forecast_mensual"] * prop
+    cierre_linea_mes = cierre_linea_mes.fillna(0).astype(int).sort_index()
+    st.dataframe(cierre_linea_mes, use_container_width=True, hide_index=False)
 
-    st.markdown("#### Proyección mensual por Línea (meses faltantes en "+str(ref_year)+")")
-    prop = df_noYear[
-        (df_noYear['FECHA'] >= pd.Timestamp(year=ref_year, month=ultimo_mes_cerrado, day=1) - pd.DateOffset(months=11)) &
-        (df_noYear['FECHA'] <= pd.Timestamp(year=ref_year, month=ultimo_mes_cerrado, day=1))
-    ].groupby("LINEA")["IMP_PRIMA"].sum()
-    if not prop.empty: prop = prop / prop.sum()
-    else: prop = pd.Series(1, index=df_noYear['LINEA'].unique()) / len(df_noYear['LINEA'].unique())
-    proy_linea = {}
-    for _, row in fc_df.iterrows():
-        fecha = row["FECHA"].strftime("%b-%Y")
-        # safe_int para cada columna por línea
-        proy_linea[fecha] = safe_int(row["Forecast_mensual"] * prop)
-    cierre_linea_mes_faltantes = pd.DataFrame(proy_linea).T.fillna(0).astype(int)
-    st.dataframe(cierre_linea_mes_faltantes, use_container_width=True, hide_index=False)
-    st.caption(f"Se muestran los meses faltantes de {ref_year} (incluyendo diciembre) y la proyección por línea.")
-
-    st.markdown(f"### Próximos meses proyectados (no cerrados en {ref_year})")
-    meses_mostrar = st.slider(
-        f"Meses a listar (faltantes de {ref_year}):",
-        1, len(fc_df), len(fc_df)
-    )
-    sel = fc_df.head(meses_mostrar).copy()
-    tabla_faltantes = pd.DataFrame({
-        "Mes": sel["FECHA"].dt.strftime("%b-%Y"),
-        "Proyección": safe_int(sel["Forecast_mensual"]),
-        "IC 95% inf": safe_int(sel["IC_lo"]),
-        "IC 95% sup": safe_int(sel["IC_hi"]),
-    })
-    show_df(tabla_faltantes, money_cols=["Proyección","IC 95% inf","IC 95% sup"], key="faltantes_2025")
-    st.caption(f"Siempre se muestra hasta diciembre. Si hay datos reales solo hasta septiembre, octubre-diciembre son estimados.")
-
-    st.markdown("##### Primas mensuales (histórico y forecast)")
-    fig_m = px.line(hist_df, x="FECHA", y="Mensual", title="Primas mensuales (histórico) y forecast")
-    fig_m = nicer_line(fig_m, "")
+    st.markdown("##### Primas mensuales (histórico y forecast)" + info_badge("Puedes deslizar abajo para ver un rango de fechas específico."), unsafe_allow_html=True)
+    fig_m = px.line(hist_df, x="FECHA", y="Mensual", title="")
+    fig_m = nicer_line(fig_m, "Primas mensuales (histórico) y forecast")
     if not fc_df.empty:
         fig_m.add_scatter(x=fc_df["FECHA"], y=fc_df["Forecast_mensual"], name="Forecast (mensual)", mode="lines+markers")
         fig_m.add_scatter(x=fc_df["FECHA"], y=fc_df["IC_lo"], name="IC 95% inf", mode="lines")
         fig_m.add_scatter(x=fc_df["FECHA"], y=fc_df["IC_hi"], name="IC 95% sup", mode="lines")
+    if not df_2024.empty:
+        fig_m.add_scatter(x=df_2024["FECHA"], y=df_2024["Mensual_2024"], name="2024 (mensual)",
+                          mode="lines+markers", line=dict(width=3, dash="dash"), opacity=0.9)
     st.plotly_chart(fig_m, use_container_width=True)
 
-    st.markdown("##### Primas acumuladas y proyección")
-    fig_a = px.line(hist_df, x="FECHA", y="ACUM", title="Primas acumuladas (histórico) y proyección acumulada")
-    fig_a = nicer_line(fig_a, "")
+    st.markdown("##### Primas acumuladas y proyección " + info_badge("Puedes deslizar para comparar periodos históricos."), unsafe_allow_html=True)
+    fig_a = px.line(hist_df, x="FECHA", y="ACUM", title="")
+    fig_a = nicer_line(fig_a, "Primas acumuladas (histórico) y proyección acumulada")
     if not fc_df.empty:
         fig_a.add_scatter(x=fc_df["FECHA"], y=fc_df["Forecast_acum"], name="Forecast (acum)", mode="lines+markers")
+    if not df_2024.empty:
+        fig_a.add_scatter(x=df_2024["FECHA"], y=df_2024["ACUM_2024"], name="2024 (acum)",
+                          mode="lines+markers", line=dict(width=3, dash="dash"), opacity=0.9)
+    if cierre_2024 > 0:
+        fig_a.add_hline(y=cierre_2024, line_dash="dot", line_width=2,
+                        annotation_text=f"Cierre 2024: {fmt_cop(cierre_2024)}",
+                        annotation_position="top left")
     st.plotly_chart(fig_a, use_container_width=True)
+
+    st.markdown(f"### Próximos meses proyectados (no cerrados en {ref_year}) " + info_badge("Proyección mensual para los meses faltantes en 2025."), unsafe_allow_html=True)
+    if meses_faltantes > 0:
+        meses_mostrar = st.slider(f"Meses a listar (faltantes de {ref_year}):", 1, meses_faltantes, min(6, meses_faltantes))
+        sel = fc_df.head(meses_mostrar).copy()
+        serie_2024_idx = serie_2024.copy()
+        mismo_mes_2024 = []
+        for d in sel["FECHA"]:
+            try:
+                valor = serie_2024_idx.loc[pd.Timestamp(year=2024, month=d.month, day=1)]
+            except KeyError:
+                valor = np.nan
+            mismo_mes_2024.append(valor)
+        tabla_faltantes = pd.DataFrame({
+            "Mes": sel["FECHA"].dt.strftime("%b-%Y"),
+            "Mismo mes 2024": np.array(mismo_mes_2024, dtype=float),
+            "Proyección": sel["Forecast_mensual"].round(0).astype(int),
+            "IC 95% inf": sel["IC_lo"].round(0).astype(int),
+            "IC 95% sup": sel["IC_hi"].round(0).astype(int),
+        })
+        show_df(tabla_faltantes, money_cols=["Mismo mes 2024","Proyección","IC 95% inf","IC 95% sup"], key="faltantes_2025")
+    else:
+        st.info(f"No quedan meses por cerrar en {ref_year} con los datos actuales.")
+
+    st.success(f"Con nowcast para el mes en curso, el *Producción 2025* (meses cerrados) es *{fmt_cop(prod_2025)}* y el *cierre estimado* asciende a *{fmt_cop(cierre_ref)}*.")
 
     hist_tbl = hist_df.copy(); hist_tbl["FECHA"] = hist_tbl["FECHA"].dt.strftime("%Y-%m")
     fc_tbl   = fc_df.copy();   fc_tbl["FECHA"] = fc_tbl["FECHA"].dt.strftime("%Y-%m")
@@ -404,58 +446,83 @@ with tabs[2]:
     serie_pres = ensure_monthly(serie_presu_all)
     pres_ref = serie_pres[serie_pres.index.year == ref_year]
 
-    df_closed_months = df_noYear[(df_noYear['FECHA'].dt.year == ref_year) & (df_noYear['IMP_PRIMA'] > 0)].copy()
-    ultimo_mes_cerrado = int(df_closed_months['FECHA'].dt.month.max())
+    serie_exec_clean0 = sanitize_trailing_zeros(serie_exec, ref_year)
+    serie_exec_clean, cur_m_ref, had_partial_ref = split_series_excluding_partial_current(serie_exec_clean0, ref_year)
 
-    ejec_cerrada = serie_exec[serie_exec.index.month <= ultimo_mes_cerrado]
-    pres_cerrada = pres_ref[pres_ref.index.month <= ultimo_mes_cerrado]
-    ytd_ejec = ejec_cerrada.sum()
-    ytd_pres = pres_cerrada.sum()
+    if had_partial_ref and cur_m_ref is not None:
+        last_closed_month_ref = cur_m_ref.month - 1
+    else:
+        last_closed_month_ref = last_actual_month_from_df(df_noYear, ref_year)
+    meses_falt_ref = max(0, 12 - last_closed_month_ref)
 
-    meses_falt_ref = 12 - ultimo_mes_cerrado
-    _, fc_ref, _ = fit_forecast(ejec_cerrada, steps=meses_falt_ref)
-    cierre_ejec_ref = ytd_ejec + fc_ref['Forecast_mensual'].sum()
+    _, fc_ref, _ = fit_forecast(serie_exec_clean, steps=max(1, meses_falt_ref))
+
+    nowcast_ref = None
+    if had_partial_ref and not fc_ref.empty and cur_m_ref is not None:
+        if fc_ref.iloc[0]["FECHA"] != cur_m_ref:
+            fc_ref.iloc[0, fc_ref.columns.get_loc("FECHA")] = cur_m_ref
+        nowcast_ref = float(fc_ref.iloc[0]["Forecast_mensual"])
+
+    ytd_ejec_cerrado = serie_exec_clean[serie_exec_clean.index.year == ref_year].sum()
+    ytd_ejec = ytd_ejec_cerrado + (nowcast_ref if nowcast_ref is not None else 0.0)
+
+    this_month = pd.Timestamp.today().month
+    ytd_pres = pres_ref.loc[pres_ref.index <= pd.Timestamp(f"{ref_year}-{this_month:02d}-01")].sum() if not pres_ref.empty else np.nan
     var_pct = ((ytd_ejec - ytd_pres) / ytd_pres * 100) if ytd_pres and not np.isnan(ytd_pres) and ytd_pres != 0 else np.nan
+
+    if had_partial_ref and nowcast_ref is not None and len(fc_ref) > 1:
+        resto_ref = fc_ref['Forecast_mensual'].iloc[1:].sum()
+    else:
+        resto_ref = fc_ref['Forecast_mensual'].sum()
+    cierre_ejec_ref = ytd_ejec + resto_ref
 
     c1,c2,c3 = st.columns(3)
     c1.metric(f"Presupuesto {ref_year} YTD", fmt_cop(ytd_pres) if not np.isnan(ytd_pres) else "s/datos")
-    c2.metric(f"Ejecutado {ref_year} YTD", fmt_cop(ytd_ejec),
+    c2.metric(f"Ejecutado {ref_year} YTD (con nowcast)", fmt_cop(ytd_ejec),
               delta=(f"{var_pct:+.1f}%" if not np.isnan(var_pct) else None))
     c3.metric(f"Cierre estimado {ref_year} (ejecución)", fmt_cop(cierre_ejec_ref))
 
     comp_ref = pd.DataFrame(index=pd.date_range(f"{ref_year}-01-01", f"{ref_year}-12-01", freq="MS"))
     comp_ref["Presupuesto"] = pres_ref.reindex(comp_ref.index) if not pres_ref.empty else np.nan
-    comp_ref["Ejecutado"] = serie_exec.reindex(comp_ref.index)
+    ejec_mes = serie_exec_clean.reindex(comp_ref.index)
+    if had_partial_ref and cur_m_ref in comp_ref.index and nowcast_ref is not None:
+        ejec_mes.loc[cur_m_ref] = nowcast_ref
+    comp_ref["Ejecutado"] = ejec_mes
+
     if meses_falt_ref > 0 and not fc_ref.empty:
-        comp_ref.loc[fc_ref["FECHA"], "Proyección ejecución"] = fc_ref.set_index("FECHA")["Forecast_mensual"]
+        fc_rest = fc_ref.copy()
+        if had_partial_ref and cur_m_ref is not None and len(fc_rest) > 0:
+            fc_rest = fc_rest.iloc[1:]
+        if len(fc_rest) > 0:
+            comp_ref.loc[fc_rest["FECHA"], "Proyección ejecución"] = fc_rest.set_index("FECHA")["Forecast_mensual"]
 
     figp = px.line(
         comp_ref.reset_index(names="FECHA"), x="FECHA",
         y=[c for c in ["Presupuesto","Ejecutado","Proyección ejecución"] if c in comp_ref.columns], title=""
     )
-    figp = nicer_line(figp, f"{ref_year}: Presupuesto vs Ejecutado y proyección")
+    figp = nicer_line(figp, f"{ref_year}: Presupuesto vs Ejecutado (con nowcast) y proyección")
     st.plotly_chart(figp, use_container_width=True)
 
-    serie_exec_clean_local = ejec_cerrada.copy()
+    serie_exec_clean_local = serie_exec_clean.copy()
     if len(serie_exec_clean_local.dropna()) < 18:
         st.info("Muestra filtrada corta: usamos comportamiento global como referencia para 2026.")
         serie_exec_global = ensure_monthly(df.groupby('FECHA')['IMP_PRIMA'].sum().sort_index())
         serie_exec_clean_local = sanitize_trailing_zeros(serie_exec_global, ref_year)
 
-    pasos_total = meses_falt_ref + 12
+    pasos_total = max(1, meses_falt_ref) + 12
     _, fc_ext, _ = fit_forecast(serie_exec_clean_local, steps=pasos_total, eval_months=6)
     sug_2026 = fc_ext.tail(12).set_index("FECHA"); sug_2026.index = pd.date_range("2026-01-01","2026-12-01",freq="MS")
 
-    base_2026 = safe_int(sug_2026["Forecast_mensual"])
+    base_2026 = sug_2026["Forecast_mensual"].round(0).astype(int)
     ipc_factor = 1 + (ipc_2026/100.0)
-    ajustado_2026 = safe_int(base_2026 * ipc_factor)
+    ajustado_2026 = (base_2026 * ipc_factor).round(0).astype(int)
 
     presupuesto_2026_df = pd.DataFrame({
         "FECHA": base_2026.index,
         "Sugerido modelo 2026": base_2026.values,
         f"Ajuste IPC {ipc_2026:.1f}%": ajustado_2026.values,
-        "IC 95% inf": safe_int(sug_2026["IC_lo"]).values,
-        "IC 95% sup": safe_int(sug_2026["IC_hi"]).values
+        "IC 95% inf": sug_2026["IC_lo"].round(0).astype(int).values,
+        "IC 95% sup": sug_2026["IC_hi"].round(0).astype(int).values
     })
     total_base = int(base_2026.sum())
     total_ajust = int(ajustado_2026.sum())
@@ -465,7 +532,7 @@ with tabs[2]:
 
     comp_ref_tbl = comp_ref.reset_index().rename(columns={"index":"FECHA"}); comp_ref_tbl["FECHA"] = comp_ref_tbl["FECHA"].dt.strftime("%Y-%m")
     p2026_tbl = presupuesto_2026_df.copy(); p2026_tbl["FECHA"] = p2026_tbl["FECHA"].dt.strftime("%Y-%m")
-    xls_pres = to_excel_bytes({f"{ref_year} Pres vs Ejec": comp_ref_tbl, f"2026 Presupuesto (IPC {ipc_2026:.1f}%)": p2026_tbl})
+    xls_pres = to_excel_bytes({f"{ref_year} Pres vs Ejec (nowcast)": comp_ref_tbl, f"2026 Presupuesto (IPC {ipc_2026:.1f}%)": p2026_tbl})
     st.download_button("⬇️ Descargar Excel (PRESUPUESTO)", data=xls_pres,
                        file_name="presupuesto_refyear_y_2026_ipc.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -484,8 +551,8 @@ with tabs[3]:
             st.info("Primero calcula el 2026 (con IPC) en la pestaña anterior.")
         else:
             base_26 = presupuesto_2026_df.copy()
-            base_col = base_26.columns[2]
-            base_26["Escenario ajustado 2026"] = safe_int(base_26[base_col]*(1+ajuste_pct/100))
+            base_col = base_26.columns[2]  # Ajuste IPC XX.X%
+            base_26["Escenario ajustado 2026"] = (base_26[base_col]*(1+ajuste_pct/100)).round(0).astype(int)
             total_base = int(base_26[base_col].sum())
             total_adj  = int(base_26["Escenario ajustado 2026"].sum())
             c1,c2 = st.columns(2)
@@ -504,7 +571,7 @@ with tabs[3]:
         perc = st.select_slider("Rango de sensibilidad", options=[5,10,15,20,25,30], value=10)
         if 'presupuesto_2026_df' in locals() and not presupuesto_2026_df.empty:
             base_26 = presupuesto_2026_df.copy()
-            base_col = base_26.columns[2]
+            base_col = base_26.columns[2]  # Ajuste IPC
             up = int((base_26[base_col]*(1+perc/100)).sum())
             dn = int((base_26[base_col]*(1-perc/100)).sum())
             bench = int(base_26[base_col].sum())
@@ -530,7 +597,7 @@ with tabs[3]:
             if not outliers.empty:
                 alert = pd.DataFrame({
                     "Fecha": outliers.index.strftime("%b-%Y"),
-                    "Valor": safe_int(s.loc[outliers.index]).values,
+                    "Valor": s.loc[outliers.index].astype(int).values,
                     "Desviación": outliers.round(2).values
                 }).sort_index()
                 show_df(alert, money_cols=["Valor"], key="anomalias")
