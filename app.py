@@ -295,6 +295,7 @@ with tabs[1]:
         last_closed_month = cur_month_ts.month - 1
     else:
         last_closed_month = last_actual_month_from_df(df_noYear, ref_year)
+    meses_diciembre = pd.date_range(f"{ref_year}-01-01", f"{ref_year}-12-01", freq="MS")
     meses_faltantes = max(0, 12 - last_closed_month)
     hist_df, fc_df, smape6 = fit_forecast(serie_train, steps=max(1, meses_faltantes), eval_months=6)
 
@@ -348,8 +349,7 @@ with tabs[1]:
     **Cierre proyectado (con nowcast):** {fmt_cop(cierre_ref)} <span class="badge"><span class="q">?</span><span class="tip">Incluye el nowcast para los meses faltantes.</span></span>
     """, unsafe_allow_html=True)
 
-    # --- TABLA GENERAL DE PROYECCIÓN MENSUAL (con nowcast en mes actual y forecast en los siguientes) ---
-    meses_diciembre = pd.date_range(f"{ref_year}-01-01", f"{ref_year}-12-01", freq="MS")
+    # --- TABLA GENERAL DE PROYECCIÓN MENSUAL ---
     serie_real = serie_prima_all.reindex(meses_diciembre, fill_value=None)
     proyeccion_mensual = [int(x) for x in fc_df["Forecast_mensual"].values] if not fc_df.empty else []
     valores = []
@@ -372,25 +372,26 @@ with tabs[1]:
     })
     show_df(tabla_general, money_cols=["Valor"], key="tabla_general_mes")
 
-    # --- TABLA DE PROYECCIÓN POR LÍNEA (con nowcast en mes actual y forecast en los siguientes) ---
+    # --- TABLA DE PROYECCIÓN POR LÍNEA (rolling proporción real por mes) ---
     lineas = sorted(df_noYear["LINEA"].unique())
     tabla_lineas = []
     for i, mes in enumerate(meses_diciembre):
         fila = {"Mes": mes.strftime("%b-%Y")}
         for linea in lineas:
             v = df_noYear[(df_noYear['FECHA'] == mes) & (df_noYear['LINEA'] == linea)]["IMP_PRIMA"].sum()
-            # Valor real si existe
             if v > 0:
                 fila[linea] = v
-            # Si es el mes actual y no ha finalizado, forecast (nowcast)
             elif mes.month == pd.Timestamp.today().month and mes.year == pd.Timestamp.today().year and len(fc_df) > 0:
-                prop = df_noYear[(df_noYear['FECHA'] >= mes - pd.DateOffset(months=11)) & (df_noYear['FECHA'] <= mes)].groupby("LINEA")["IMP_PRIMA"].sum()
-                prop = prop / prop.sum() if prop.sum() > 0 else pd.Series([1/len(lineas)]*len(lineas), index=lineas)
+                prop_df = df_noYear[(df_noYear['FECHA'] >= mes - pd.DateOffset(months=12)) & (df_noYear['FECHA'] < mes)]
+                suma_linea = prop_df.groupby("LINEA")["IMP_PRIMA"].sum()
+                suma_total = suma_linea.sum()
+                prop = suma_linea / suma_total if suma_total > 0 else pd.Series([1/len(lineas)]*len(lineas), index=lineas)
                 fila[linea] = int(fc_df["Forecast_mensual"].iloc[0] * prop.get(linea, 1/len(lineas)))
-            # Mes futuro, proyección
             elif i < len(fc_df):
-                prop = df_noYear[(df_noYear['FECHA'] >= mes - pd.DateOffset(months=11)) & (df_noYear['FECHA'] <= mes)].groupby("LINEA")["IMP_PRIMA"].sum()
-                prop = prop / prop.sum() if prop.sum() > 0 else pd.Series([1/len(lineas)]*len(lineas), index=lineas)
+                prop_df = df_noYear[(df_noYear['FECHA'] >= mes - pd.DateOffset(months=12)) & (df_noYear['FECHA'] < mes)]
+                suma_linea = prop_df.groupby("LINEA")["IMP_PRIMA"].sum()
+                suma_total = suma_linea.sum()
+                prop = suma_linea / suma_total if suma_total > 0 else pd.Series([1/len(lineas)]*len(lineas), index=lineas)
                 fila[linea] = int(fc_df["Forecast_mensual"].iloc[i] * prop.get(linea, 1/len(lineas)))
             else:
                 fila[linea] = 0
@@ -477,14 +478,16 @@ with tabs[2]:
     })
     show_df(presupuesto_2026_df, money_cols=["Sugerido modelo 2026", f"Ajuste IPC {ipc_2026:.1f}%", "IC 95% inf","IC 95% sup"], key="pres_2026")
 
-    # --- TABLA DE PROYECCIÓN POR LÍNEA PARA 2026 ---
+    # --- TABLA DE PROYECCIÓN POR LÍNEA PARA 2026 (rolling window correcto) ---
     lineas = sorted(df_noYear["LINEA"].unique())
     tabla_lineas_2026 = []
-    for i, mes in enumerate(pd.date_range("2026-01-01","2026-12-01",freq="MS")):
+    meses_2026 = pd.date_range("2026-01-01","2026-12-01",freq="MS")
+    for i, mes in enumerate(meses_2026):
         fila = {"Mes": mes.strftime("%b-%Y")}
-        prop = df_noYear[(df_noYear['FECHA'] >= mes - pd.DateOffset(months=11)) & (df_noYear['FECHA'] <= mes)] \
-            .groupby("LINEA")["IMP_PRIMA"].sum()
-        prop = prop / prop.sum() if prop.sum() > 0 else pd.Series([1/len(lineas)]*len(lineas), index=lineas)
+        prop_df = df_noYear[(df_noYear['FECHA'] >= mes - pd.DateOffset(months=12)) & (df_noYear['FECHA'] < mes)]
+        suma_linea = prop_df.groupby("LINEA")["IMP_PRIMA"].sum()
+        suma_total = suma_linea.sum()
+        prop = suma_linea / suma_total if suma_total > 0 else pd.Series([1/len(lineas)]*len(lineas), index=lineas)
         for linea in lineas:
             if i < len(base_2026):
                 fila[linea] = int(base_2026.iloc[i] * prop.get(linea, 1/len(lineas)))
