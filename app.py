@@ -18,39 +18,16 @@ st.set_page_config(
 )
 
 # ============ ESTILO DINÁMICO ============
-# Tema claro/oscuro automático y badges legibles
 st.markdown("""
 <style>
-body, .stApp {
-  background: #f5f7fa !important;
-  color: #18212f !important;
-}
-@media (prefers-color-scheme: dark) {
-  body, .stApp {
-    background: #101522 !important;
-    color: #f3f7fa !important;
-  }
-}
+body, .stApp { background: #f5f7fa !important; color: #18212f !important;}
+@media (prefers-color-scheme: dark) { body, .stApp { background: #101522 !important; color: #f3f7fa !important;}}
 .block-container { padding-top: 0.6rem; }
 .stDataFrame th, .stDataFrame td {color: #24314e !important;}
-@media (prefers-color-scheme: dark) {
-  .stDataFrame th, .stDataFrame td {color: #e5e9f5 !important;}
-}
-.glass {background: rgba(17, 24, 39, 0.35); border: 1px solid rgba(255,255,255,0.08);
-       box-shadow: 0 10px 30px rgba(0,0,0,0.15); backdrop-filter: blur(10px);
-       border-radius: 18px; padding: 14px 18px;}
-.neon { text-shadow: 0 0 10px #3b82f6, 0 0 20px #3b82f6; }
-/* Tooltips (CSS-only) */
+@media (prefers-color-scheme: dark) {.stDataFrame th, .stDataFrame td {color: #e5e9f5 !important;}}
 .badge{display:inline-block;position:relative;margin-left:6px}
-.badge.right{margin-left:0;margin-right:6px}
 .badge > .q{cursor:help;color:#e43a7a;font-weight:700}
-.badge .tip{
-  visibility:hidden;opacity:0;transition:opacity .15s;
-  position:absolute;left:0;bottom:125%;width:320px;z-index:50;
-  background:rgba(15,23,42,.96);color:#e5e7eb;border:1px solid rgba(148,163,184,.35);
-  padding:10px 12px;border-radius:10px;font-size:12.5px;
-}
-.badge.right .tip{left:auto;right:0}
+.badge .tip{visibility:hidden;opacity:0;transition:opacity .15s;position:absolute;left:0;bottom:125%;width:320px;z-index:50;background:rgba(15,23,42,.96);color:#e5e7eb;border:1px solid rgba(148,163,184,.35);padding:10px 12px;border-radius:10px;font-size:12.5px;}
 .badge:hover .tip{visibility:visible;opacity:1}
 </style>
 """, unsafe_allow_html=True)
@@ -58,13 +35,12 @@ body, .stApp {
 # ======= BRANDING =======
 LOGO_URL = "https://d7nxjt1whovz0.cloudfront.net/marketplace/logos/divisions/seguros-de-vida-del-estado.png"
 HERO_URL = "https://images.unsplash.com/photo-1556157382-97eda2d62296?q=80&w=2400&auto=format&fit=crop"
-
 st.markdown(f"""
-<div class="glass" style="display:flex;align-items:center;gap:18px;margin-bottom:12px">
+<div style="display:flex;align-items:center;gap:18px;margin-bottom:12px">
   <img src="{LOGO_URL}" alt="Seguros del Estado" style="height:48px;object-fit:contain;border-radius:8px;" onerror="this.style.display='none'">
   <div>
-    <div class="neon" style="font-size:20px;font-weight:700;">AseguraView · Colombiana Seguros del Estado S.A.</div>
-    <div style="opacity:.75">Inteligencia de negocio en tiempo real · Forecast SARIMAX</div>
+    <div style="font-size:20px;font-weight:700;color:#e43a7a">AseguraView · Colombiana Seguros del Estado S.A.</div>
+    <div style="opacity:.75;color:#24314e">Inteligencia de negocio en tiempo real · Forecast SARIMAX</div>
   </div>
 </div>
 <img src="{HERO_URL}" alt="hero" style="width:100%;height:180px;object-fit:cover;border-radius:18px;opacity:.35;margin-bottom:10px" onerror="this.style.display='none'">
@@ -188,13 +164,13 @@ def fmt_cop(x):
     except Exception: return x
 
 def show_df(df, money_cols=None, index=False, key=None):
-    if money_cols is None:
-        money_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     d = df.copy()
-    for c in money_cols: d[c] = d[c].map(fmt_cop)
+    if money_cols is not None:
+        for c in money_cols:
+            if c in d.columns:
+                d[c] = d[c].map(fmt_cop)
     st.dataframe(d, use_container_width=True, hide_index=not index, key=key)
 
-# ============ CARGA ============
 @st.cache_data(show_spinner=False)
 def load_datos(url_csv: str) -> pd.DataFrame:
     df = pd.read_csv(url_csv)
@@ -287,7 +263,6 @@ with tabs[0]:
 with tabs[1]:
     ref_year = 2025
 
-    # Último mes real con producción
     produccion_2025 = df_noYear[
         (df_noYear['FECHA'].dt.year == 2025) & (df_noYear['IMP_PRIMA'] > 0)
     ]
@@ -321,7 +296,7 @@ with tabs[1]:
         resto = fc_df['Forecast_mensual'].sum()
     cierre_ref = ytd_ref + resto
 
-    # KPIs con badge y HTML
+    # KPIs
     c1, c2, c3, c4 = st.columns(4)
     c1.markdown(f"""
     <span style="font-size:16px;font-weight:500;">
@@ -355,20 +330,31 @@ with tabs[1]:
     <span style="font-size:2em;font-weight:700;">{smape6:.2f}%</span>
     """, unsafe_allow_html=True)
 
-    # Info bajo KPIs
     st.markdown(f"""
     **Último mes con primas en 2025:** {ultimo_mes_con_prima.strftime('%B %Y') if ultimo_mes_con_prima else 'Sin datos'}  
     **Acumulado hasta ese mes:** {fmt_cop(suma_acumulada_2025)} <span class="badge"><span class="q">?</span><span class="tip">Suma acumulada hasta el último mes con cierre de primas en 2025.</span></span>  
     **Cierre proyectado (con nowcast):** {fmt_cop(cierre_ref)} <span class="badge"><span class="q">?</span><span class="tip">Incluye el nowcast para los meses faltantes.</span></span>
     """, unsafe_allow_html=True)
 
-    # Tabla general por mes hasta diciembre (proyección general)
-    st.markdown("##### Proyección general por mes hasta diciembre <span class=\"badge\"><span class=\"q\">?</span><span class=\"tip\">Proyección total mensual para todo el año.</span></span>", unsafe_allow_html=True)
+    # Tabla general de proyección mensual (enero a diciembre, datos reales y proyectados)
+    meses_diciembre = pd.date_range(f"{ref_year}-01-01", f"{ref_year}-12-01", freq="MS")
+    # Reales
+    serie_real = serie_prima_all.reindex(meses_diciembre, fill_value=None)
+    # Proyección (para los meses faltantes)
+    proyeccion_mensual = [int(x) for x in fc_df["Forecast_mensual"].values] if not fc_df.empty else []
+    valores = []
+    for i, mes in enumerate(meses_diciembre):
+        if pd.notnull(serie_real.get(mes, None)) and serie_real.get(mes, None) > 0:
+            valores.append(serie_real[mes])
+        elif i < len(proyeccion_mensual):
+            valores.append(proyeccion_mensual[i])
+        else:
+            valores.append(0)
     tabla_general = pd.DataFrame({
-        "Mes": pd.date_range(f"{ref_year}-01-01", f"{ref_year}-12-01", freq="MS").strftime("%b-%Y"),
-        "Proyección": [int(x) for x in fc_df["Forecast_mensual"].values] if not fc_df.empty else []
+        "Mes": meses_diciembre.strftime("%b-%Y"),
+        "Valor": valores
     })
-    show_df(tabla_general, money_cols=["Proyección"], key="tabla_general_mes")
+    show_df(tabla_general, money_cols=["Valor"], key="tabla_general_mes")
 
     # Proyección mensual por Línea
     st.markdown("##### Proyección mensual por Línea <span class=\"badge\"><span class=\"q\">?</span><span class=\"tip\">Cierre estimado de cada línea por mes en 2025 (basado en forecast).</span></span>", unsafe_allow_html=True)
@@ -390,7 +376,7 @@ with tabs[1]:
             fecha = row["FECHA"].strftime("%b-%Y")
             cierre_linea_mes.loc[fecha] = row["Forecast_mensual"] * prop
     cierre_linea_mes = cierre_linea_mes.fillna(0).astype(int).sort_index()
-    st.dataframe(cierre_linea_mes, use_container_width=True, hide_index=False)
+    show_df(cierre_linea_mes, money_cols=cierre_linea_mes.columns.tolist(), key="lineas_prima")
 
     # Gráficos igual que original
     st.markdown("##### Primas mensuales (histórico y forecast) <span class=\"badge\"><span class=\"q\">?</span><span class=\"tip\">Puedes deslizar abajo para ver un rango de fechas específico.</span></span>", unsafe_allow_html=True)
@@ -435,7 +421,6 @@ with tabs[2]:
 
     ytd_ejec_cerrado = serie_exec_clean[serie_exec_clean.index.year == ref_year].sum()
     ytd_ejec = ytd_ejec_cerrado + (nowcast_ref if nowcast_ref is not None else 0.0)
-    # Eliminar el cierre estimado ejecución, reemplazar por % de ejecución proyectado
     cierre_primas_proj = cierre_ref
     pres_anual_2025 = pres_2025
     porc_ejec = (cierre_primas_proj / pres_anual_2025 * 100) if pres_anual_2025 > 0 else 0
@@ -445,7 +430,6 @@ with tabs[2]:
     c2.metric(f"Ejecutado 2025 YTD (con nowcast)", fmt_cop(ytd_ejec))
     c3.metric(f"Proyección cierre primas vs presupuesto", f"{fmt_cop(cierre_primas_proj)} ({porc_ejec:.1f}%)")
 
-    # Tabla de presupuesto incluye presupuesto 2024
     st.markdown(f"""
     <span style="color:#198754;font-weight:600">Presupuesto 2026 — Base modelo: {fmt_cop(pres_2025)} · Presupuesto 2024: {fmt_cop(pres_2024)} · Con IPC {ipc_2026:.1f}%: <b>{fmt_cop(pres_2025 * (1+ipc_2026/100))}</b></span>
     """, unsafe_allow_html=True)
@@ -489,7 +473,7 @@ with tabs[3]:
             c1,c2 = st.columns(2)
             c1.metric("Total 2026 (con IPC)", fmt_cop(total_base))
             c2.metric("Total escenario 2026", fmt_cop(total_adj), delta=f"{ajuste_pct:+d}%")
-            show_df(base_26[["FECHA",base_col,"Escenario ajustado 2026"]], key="escenario26")
+            show_df(base_26[["FECHA",base_col,"Escenario ajustado 2026"]], money_cols=[base_col,"Escenario ajustado 2026"], key="escenario26")
             xls_dir = to_excel_bytes({"2026_con_IPC_vs_ajustado": base_26.assign(FECHA=base_26["FECHA"].dt.strftime("%Y-%m"))})
             st.download_button("⬇️ Descargar Excel (Modo Director - 2026)", data=xls_dir,
                                file_name="modo_director_2026.xlsx",
@@ -505,8 +489,9 @@ with tabs[3]:
             dn = int((base_26[base_col]*(1-perc/100)).sum())
             bench = int(base_26[base_col].sum())
             tornado = pd.DataFrame({"Escenario":[f"-{perc}%", "Base", f"+{perc}%"], "Total":[dn, bench, up]})
+            tornado["Total"] = tornado["Total"].map(fmt_cop)
             fig_t = px.bar(tornado, x="Escenario", y="Total", text="Total")
-            fig_t.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
+            fig_t.update_traces(texttemplate="%{text}", textposition="outside")
             fig_t.update_layout(yaxis_title="COP", xaxis_title=None, margin=dict(l=10,r=10,t=20,b=20))
             fig_t.update_xaxes(rangeslider_visible=False)
             st.plotly_chart(fig_t, use_container_width=True)
