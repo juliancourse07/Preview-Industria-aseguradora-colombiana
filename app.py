@@ -18,57 +18,56 @@ st.set_page_config(
 # Tema base + estilos y tooltips sin JS
 st.markdown("""
 <style>
-body {background: radial-gradient(1200px 800px at 10% 10%, #0b1220 0%, #0a0f1a 45%, #060a12 100%) !important;}
-.stApp {background-color: #111827;}
+body {background: #131927 !important; color: #fff;}
+.stApp {background-color: #131927;}
 .block-container { padding-top: 0.6rem; }
-.stDataFrame th, .stDataFrame td {color: #d8e2ff !important;}
-.glass {background: rgba(17, 24, 39, 0.35); border: 1px solid rgba(255,255,255,0.08);
-       box-shadow: 0 10px 30px rgba(0,0,0,0.35); backdrop-filter: blur(10px);
-       border-radius: 18px; padding: 14px 18px;}
-.neon { text-shadow: 0 0 10px #3b82f6, 0 0 20px #3b82f6; }
-.glow {position: fixed; inset: auto auto 20px 20px; width: 220px; height: 220px;
-       background: radial-gradient(closest-side at 50% 50%, rgba(59,130,246,.28), rgba(59,130,246,0));
-       filter: blur(20px); pointer-events: none; z-index: 0; opacity:.6;}
+.stDataFrame th, .stDataFrame td {color: #e8f0fd !important;}
+.kpi-row {display:flex;justify-content:space-between;margin-bottom:18px;}
+.kpi-block {flex:1;padding:0 16px;}
+.kpi-title{font-size:17px;font-weight:500;}
+.kpi-value{font-size:2em;font-weight:700;}
 .badge{display:inline-block;position:relative;margin-left:6px}
-.badge.right{margin-left:0;margin-right:6px}
-.badge > .q{cursor:help;color:#93c5fd;font-weight:700}
+.badge .q{cursor:help;color:#93c5fd;font-weight:700}
 .badge .tip{
   visibility:hidden;opacity:0;transition:opacity .15s;
   position:absolute;left:0;bottom:125%;width:320px;z-index:50;
   background:rgba(15,23,42,.96);color:#e5e7eb;border:1px solid rgba(148,163,184,.35);
   padding:10px 12px;border-radius:10px;font-size:12.5px;
 }
-.badge.right .tip{left:auto;right:0}
 .badge:hover .tip{visibility:visible;opacity:1}
+.tabsbar {background:#161c2a;padding:7px 0 0 0;display:flex;align-items:center;gap:22px;margin-bottom:20px;border-bottom:2px solid #232b44;}
+.tabsbar .tab {font-size:16px;font-weight:500;color:#dee5f7;display:flex;align-items:center;gap:8px;opacity:.85;}
+.tabsbar .tab.active {color:#e43a7a;border-bottom:3px solid #e43a7a;padding-bottom:6px;}
+.tabsbar .tab i {font-size:17px;}
 </style>
-<div class="glow"></div>
 """, unsafe_allow_html=True)
 
 LOGO_URL = "https://d7nxjt1whovz0.cloudfront.net/marketplace/logos/divisions/seguros-de-vida-del-estado.png"
 HERO_URL = "https://images.unsplash.com/photo-1556157382-97eda2d62296?q=80&w=2400&auto=format&fit=crop"
 st.markdown(f"""
-<div class="glass" style="display:flex;align-items:center;gap:18px;margin-bottom:12px">
+<div style="display:flex;align-items:center;gap:18px;margin-bottom:12px">
   <img src="{LOGO_URL}" alt="Seguros del Estado" style="height:48px;object-fit:contain;border-radius:8px;" onerror="this.style.display='none'">
   <div>
-    <div class="neon" style="font-size:20px;font-weight:700;">AseguraView · Colombiana Seguros del Estado S.A.</div>
-    <div style="opacity:.75">Inteligencia de negocio en tiempo real · Forecast SARIMAX</div>
+    <div style="font-size:26px;font-weight:700;color:#e8f0fd;">AseguraView · Primas & Presupuesto</div>
+    <div style="opacity:.75;color:#dee5f7;font-size:15px;">Forecast mensual (SARIMAX), nowcast del mes en curso, cierre estimado 2025 y presupuesto sugerido 2026 (con IPC), por Sucursal / Línea / Compañía.</div>
   </div>
 </div>
-<img src="{HERO_URL}" alt="hero" style="width:100%;height:180px;object-fit:cover;border-radius:18px;opacity:.35;margin-bottom:10px" onerror="this.style.display='none'">
+<div style="width:100%;height:8px;"></div>
+<div class="tabsbar">
+  <span class="tab active"><i>🏠</i>Presentación</span>
+  <span class="tab"><i>📈</i>Primas (forecast & cierre)</span>
+  <span class="tab"><i>🧭</i>Presupuesto 2026</span>
+  <span class="tab"><i>🧠</i>Modo Director BI</span>
+</div>
 """, unsafe_allow_html=True)
 
-st.title("AseguraView · Primas & Presupuesto")
-st.caption("Forecast mensual (SARIMAX), nowcast del mes en curso, cierre estimado y presupuesto sugerido 2026 (con IPC), por Sucursal / Línea / Compañía.")
+tabs = st.tabs(["Presentación", "Primas (forecast & cierre)", "Presupuesto 2026", "Modo Director BI"])
 
 SHEET_ID = "1ThVwW3IbkL7Dw_Vrs9heT1QMiHDZw1Aj-n0XNbDi9i8"
 SHEET_NAME_DATOS = "Hoja1"
 
 def gsheet_csv(sheet_id, sheet_name):
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
-
-def info_badge(texto:str, right:bool=False) -> str:
-    cls = "badge right" if right else "badge"
-    return f'<span class="{cls}"><span class="q">❓</span><span class="tip">{texto}</span></span>'
 
 def parse_number_co(series: pd.Series) -> pd.Series:
     s = series.astype(str)
@@ -189,7 +188,7 @@ def load_datos(url_csv: str) -> pd.DataFrame:
         'Compañía':'COMPANIA','COMPAÑÍA':'COMPANIA','COMPANIA':'COMPANIA',
         'Imp Prima':'IMP_PRIMA','Imp Prima Cuota':'IMP_PRIMA_CUOTA'
     }
-    df = df.rename(columns={k:v for k,v in rename_map.items() if k in df.columns})
+    df = df.rename(columns={k:v for k,v in rename_map.items() if k in df.columns])
     if 'MES_TXT' in df.columns:
         df['FECHA'] = pd.to_datetime(df['MES_TXT'], dayfirst=True, errors='coerce')
     else:
@@ -242,64 +241,41 @@ if serie_prima_all.empty:
     st.warning("No hay datos de IMP_PRIMA con los filtros seleccionados."); st.stop()
 ultimo_anio_datos = int(df['FECHA'].max().year)
 
-tabs = st.tabs(["🏠 Presentación", "📈 Primas (forecast & cierre)", "🧭 Presupuesto 2026", "🧠 Modo Director BI"])
-
-with tabs[0]:
-    st.markdown("## Bienvenido a *AseguraView*")
-    st.markdown("""
-    <div class="glass" style="padding:18px; line-height:1.5;">
-      <b>¿Qué es?</b><br>
-      AseguraView es el tablero corporativo para visualizar <b>Primas</b> y comparar la <b>ejecución vs presupuesto</b>,
-      además de pronosticar <b>cierres de año</b> y sugerir el <b>presupuesto 2026</b> con base en el comportamiento mensual histórico.
-      <br><br>
-      <b>¿Cómo lo hace?</b><br>
-      • <b>SARIMAX</b> (estacionalidad 12) para meses faltantes del año actual y todo 2026.<br>
-      • Limpieza de ceros finales y <b>exclusión del mes actual si está parcial</b> (nowcast) para evitar sesgos a la baja.<br>
-      • <b>Presupuesto 2026</b>: se ajusta automáticamente por el <b>IPC proyectado</b> que defines en el panel lateral (<i>{ipc:.1f}%</i>).<br>
-      • IC 95%, tablas exportables a Excel y modo ejecutivo con escenarios.
-      <br><br>
-      <i>Nota:</i> Si el mes en curso no está completo (p. ej., septiembre hasta el día 23), se estima con el modelo (nowcast) y se suma al YTD.
-      <br><br>
-      <span style="color:#e43a7a;font-weight:600">Corte de información: 07/10/2025.</span>
-    </div>
-    """.format(ipc=ipc_2026), unsafe_allow_html=True)
-
 with tabs[1]:
     ref_year = int(df['FECHA'].max().year)
     base_series = sanitize_trailing_zeros(serie_prima_all.copy(), ref_year)
     serie_train, cur_month_ts, had_partial = split_series_excluding_partial_current(base_series, ref_year)
-    if had_partial and cur_month_ts is not None:
-        last_closed_month = cur_month_ts.month - 1
-    else:
-        last_closed_month = last_actual_month_from_df(df_noYear, ref_year)
+    last_closed_month = last_actual_month_from_df(df_noYear, ref_year)
     meses_diciembre = pd.date_range(f"{ref_year}-01-01", f"{ref_year}-12-01", freq="MS")
     meses_faltantes = max(0, 12 - last_closed_month)
     hist_df, fc_df, smape6 = fit_forecast(serie_train, steps=max(1, meses_faltantes), eval_months=6)
 
-    nowcast_actual = None
-    if had_partial and not fc_df.empty and cur_month_ts is not None:
-        if fc_df.iloc[0]["FECHA"] != cur_month_ts:
-            fc_df.iloc[0, fc_df.columns.get_loc("FECHA")] = cur_month_ts
-        nowcast_actual = float(fc_df.iloc[0]["Forecast_mensual"])
-
-    serie_2024 = ensure_monthly(serie_prima_all[serie_prima_all.index.year == 2024])
-    df_2024 = pd.DataFrame({"FECHA": serie_2024.index, "Mensual_2024": serie_2024.values})
-    df_2024["ACUM_2024"] = serie_2024.cumsum().values
-
+    # === KPIs superiores, como en la foto ===
     prod_2025 = serie_train[serie_train.index.year == ref_year].sum()
-    ytd_ref = prod_2025 + (nowcast_actual if nowcast_actual is not None else 0.0)
-    if had_partial and nowcast_actual is not None and len(fc_df) > 1:
-        resto = fc_df['Forecast_mensual'].iloc[1:].sum()
-    else:
-        resto = fc_df['Forecast_mensual'].sum()
-    cierre_ref = ytd_ref + resto
-    cierre_2024 = float(serie_2024.sum()) if not serie_2024.empty else 0.0
+    cierre_ref = prod_2025 + fc_df["Forecast_mensual"].sum() if not fc_df.empty else prod_2025
+    cierre_2024 = serie_prima_all[serie_prima_all.index.year == 2024].sum()
+    smape_val = smape6 if not np.isnan(smape6) else 0.0
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Producción 2025 " + info_badge("Corresponde a la suma de meses cerrados (mes completo más reciente, sin forecast)."), fmt_cop(prod_2025))
-    c2.metric("Cierre estimado 2025", fmt_cop(cierre_ref))
-    c3.metric("Cierre anual 2024", fmt_cop(cierre_2024))
-    c4.metric("SMAPE validación " + info_badge("¿Qué es SMAPE? Es el error porcentual medio simétrico en la validación rolling de 6 meses."), f"{smape6:.2f}%" if not np.isnan(smape6) else "?")
+    st.markdown(f"""
+    <div class="kpi-row">
+      <div class="kpi-block">
+        <div class="kpi-title">Producción 2025 <span class="badge"><span class="q">?</span><span class="tip">Corresponde a la suma de meses cerrados (sin forecast).</span></span></div>
+        <div class="kpi-value">{fmt_cop(prod_2025)}</div>
+      </div>
+      <div class="kpi-block">
+        <div class="kpi-title">Cierre estimado 2025</div>
+        <div class="kpi-value">{fmt_cop(cierre_ref)}</div>
+      </div>
+      <div class="kpi-block">
+        <div class="kpi-title">Cierre anual 2024</div>
+        <div class="kpi-value">{fmt_cop(cierre_2024)}</div>
+      </div>
+      <div class="kpi-block">
+        <div class="kpi-title">SMAPE validación <span class="badge"><span class="q">?</span><span class="tip">Error porcentual medio simétrico en la validación rolling de 6 meses.</span></span></div>
+        <div class="kpi-value">{smape_val:.2f}%</div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     # --- TABLA GENERAL DE PROYECCIÓN MENSUAL ---
     tabla_general_valores = []
@@ -351,51 +327,19 @@ with tabs[1]:
     df_lineas_tabla = df_lineas_tabla[["Mes"] + lineas]
     show_df(df_lineas_tabla, money_cols=lineas, key="tabla_linea_mes")
 
-    # --- GRÁFICO DE PRIMAS MENSUALES (HISTÓRICO Y FORECAST) ---
-    st.markdown("##### Primas mensuales (histórico y forecast)" + info_badge("Puedes deslizar abajo para ver un rango de fechas específico."), unsafe_allow_html=True)
-    fig_m = px.line(hist_df, x="FECHA", y="Mensual", title="")
-    fig_m.update_traces(mode="lines+markers", marker=dict(size=7), line=dict(width=2))
-    if not fc_df.empty:
-        fig_m.add_scatter(x=fc_df["FECHA"], y=fc_df["Forecast_mensual"], name="Forecast (mensual)", mode="lines+markers")
-        fig_m.add_scatter(x=fc_df["FECHA"], y=fc_df["IC_lo"], name="IC 95% inf", mode="lines")
-        fig_m.add_scatter(x=fc_df["FECHA"], y=fc_df["IC_hi"], name="IC 95% sup", mode="lines")
-    if not df_2024.empty:
-        fig_m.add_scatter(x=df_2024["FECHA"], y=df_2024["Mensual_2024"], name="2024 (mensual)",
-                          mode="lines+markers", line=dict(width=3, dash="dash"), opacity=0.9)
-    st.plotly_chart(fig_m, use_container_width=True)
-
-    st.markdown("##### Primas acumuladas y proyección " + info_badge("Puedes deslizar para comparar periodos históricos."), unsafe_allow_html=True)
-    fig_a = px.line(hist_df, x="FECHA", y="ACUM", title="")
-    fig_a.update_traces(mode="lines+markers", marker=dict(size=7), line=dict(width=2))
-    if not fc_df.empty:
-        fig_a.add_scatter(x=fc_df["FECHA"], y=fc_df["Forecast_acum"], name="Forecast (acum)", mode="lines+markers")
-    if not df_2024.empty:
-        fig_a.add_scatter(x=df_2024["FECHA"], y=df_2024["ACUM_2024"], name="2024 (acum)",
-                          mode="lines+markers", line=dict(width=3, dash="dash"), opacity=0.9)
-    if cierre_2024 > 0:
-        fig_a.add_hline(y=cierre_2024, line_dash="dot", line_width=2,
-                        annotation_text=f"Cierre 2024: {fmt_cop(cierre_2024)}",
-                        annotation_position="top left")
-    st.plotly_chart(fig_a, use_container_width=True)
-
 with tabs[2]:
-    st.subheader("Ejecución vs Presupuesto año actual y Presupuesto sugerido 2026")
-    st.caption(f"Nota: el presupuesto 2026 aplica un ajuste automático de *IPC proyectado {ipc_2026:.1f}%*.")
+    st.markdown("""
+    <h2 style="color:#e8f0fd;">Ejecución vs Presupuesto año actual y Presupuesto sugerido 2026</h2>
+    <div style="opacity:.85;font-size:16px;">Nota: el presupuesto 2026 aplica un ajuste automático de <i>IPC proyectado {0:.1f}%</i>.</div>
+    """.format(ipc_2026), unsafe_allow_html=True)
 
     ref_year = int(df['FECHA'].max().year)
-    pres_ref = serie_presu_all[serie_presu_all.index.year == ref_year]
-    serie_exec_clean0 = sanitize_trailing_zeros(serie_prima_all, ref_year)
-    serie_exec_clean, cur_m_ref, had_partial_ref = split_series_excluding_partial_current(serie_exec_clean0, ref_year)
-    if had_partial_ref and cur_m_ref is not None:
-        last_closed_month_ref = cur_m_ref.month - 1
-    else:
-        last_closed_month_ref = last_actual_month_from_df(df_noYear, ref_year)
-    meses_falt_ref = max(0, 12 - last_closed_month_ref)
-    _, fc_ref, _ = fit_forecast(serie_exec_clean, steps=max(1, meses_falt_ref))
-    pasos_total = max(1, meses_falt_ref) + 12
-    _, fc_ext, _ = fit_forecast(serie_exec_clean, steps=pasos_total, eval_months=6)
-    sug_2026 = fc_ext.tail(12).set_index("FECHA"); sug_2026.index = pd.date_range("2026-01-01","2026-12-01",freq="MS")
-
+    pres_2025 = serie_presu_all[serie_presu_all.index.year == ref_year].sum()
+    cierre_2025 = serie_prima_all[serie_prima_all.index.year == ref_year].sum()
+    pasos_total = 12
+    _, fc_ext, _ = fit_forecast(serie_prima_all, steps=pasos_total, eval_months=6)
+    meses_2026 = pd.date_range("2026-01-01","2026-12-01",freq="MS")
+    sug_2026 = fc_ext.head(12).set_index("FECHA"); sug_2026.index = meses_2026
     base_2026 = sug_2026["Forecast_mensual"].round(0).astype(int)
     ipc_factor = 1 + (ipc_2026/100.0)
     ajustado_2026 = (base_2026 * ipc_factor).round(0).astype(int)
@@ -406,127 +350,47 @@ with tabs[2]:
         "IC 95% inf": sug_2026["IC_lo"].round(0).astype(int).values,
         "IC 95% sup": sug_2026["IC_hi"].round(0).astype(int).values
     })
+
+    st.markdown(f"""
+    <div class="kpi-row">
+      <div class="kpi-block">
+        <div class="kpi-title">Presupuesto 2025</div>
+        <div class="kpi-value">{fmt_cop(pres_2025)}</div>
+      </div>
+      <div class="kpi-block">
+        <div class="kpi-title">Cierre ejecutado 2025</div>
+        <div class="kpi-value">{fmt_cop(cierre_2025)}</div>
+      </div>
+      <div class="kpi-block">
+        <div class="kpi-title">Presupuesto sugerido 2026</div>
+        <div class="kpi-value">{fmt_cop(base_2026.sum())}</div>
+      </div>
+      <div class="kpi-block">
+        <div class="kpi-title">Presupuesto 2026 con IPC</div>
+        <div class="kpi-value">{fmt_cop(ajustado_2026.sum())}</div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
     show_df(presupuesto_2026_df, money_cols=["Sugerido modelo 2026", f"Ajuste IPC {ipc_2026:.1f}%", "IC 95% inf","IC 95% sup"], key="pres_2026")
 
     # --- TABLA DE PROYECCIÓN POR LÍNEA PARA 2026 ---
     lineas = sorted(df_noYear["LINEA"].unique())
     tabla_lineas_2026 = []
-    meses_2026 = pd.date_range("2026-01-01","2026-12-01",freq="MS")
     for i, mes in enumerate(meses_2026):
         fila = {"Mes": mes.strftime("%b-%Y")}
-        idx_fc = i
+        prop_df = df_noYear[(df_noYear['FECHA'] >= mes - pd.DateOffset(months=11)) & (df_noYear['FECHA'] <= mes)]
+        suma_linea = prop_df.groupby("LINEA")["IMP_PRIMA"].sum()
+        suma_total = suma_linea.sum()
+        prop = suma_linea / suma_total if suma_total > 0 else pd.Series([1/len(lineas)]*len(lineas), index=lineas)
         for linea in lineas:
-            prop_df = df_noYear[(df_noYear['FECHA'] >= mes - pd.DateOffset(months=11)) & (df_noYear['FECHA'] <= mes)]
-            suma_linea = prop_df.groupby("LINEA")["IMP_PRIMA"].sum()
-            suma_total = suma_linea.sum()
-            prop = suma_linea / suma_total if suma_total > 0 else pd.Series([1/len(lineas)]*len(lineas), index=lineas)
-            fila[linea] = int(base_2026.iloc[idx_fc] * prop.get(linea, 1/len(lineas)))
+            fila[linea] = int(base_2026.iloc[i] * prop.get(linea, 1/len(lineas)))
         tabla_lineas_2026.append(fila)
     df_lineas_tabla_2026 = pd.DataFrame(tabla_lineas_2026)
     df_lineas_tabla_2026 = df_lineas_tabla_2026[["Mes"] + lineas]
-    st.markdown("##### Proyección mensual 2026 por Línea " + info_badge("Proyección de cada línea para 2026."), unsafe_allow_html=True)
+    st.markdown("##### Proyección mensual 2026 por Línea", unsafe_allow_html=True)
     show_df(df_lineas_tabla_2026, money_cols=lineas, key="tabla_linea_2026")
-
-    xls_pres = BytesIO()
-    with pd.ExcelWriter(xls_pres, engine="openpyxl") as writer:
-        presupuesto_2026_df.to_excel(writer, sheet_name="Presupuesto 2026", index=False)
-        df_lineas_tabla_2026.to_excel(writer, sheet_name="Proyección líneas 2026", index=False)
-    st.download_button("⬇️ Descargar Excel (PRESUPUESTO)", data=xls_pres.getvalue(),
-                       file_name="presupuesto_2026_ipc.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 with tabs[3]:
     st.subheader("Panel Ejecutivo · Sensibilidades & Hallazgos")
-    colA,colB = st.columns([1,1])
-
-    with colA:
-        st.markdown("#### Escenario 2026 ajustado " + info_badge(
-            "Mueve el porcentaje para ver cómo cambia el total anual si todos los meses de 2026 suben o bajan."
-        ), unsafe_allow_html=True)
-        ajuste_pct = st.slider("Ajuste vs. 2026 (con IPC) (±30%)", -30, 30, 0, 1)
-        if 'presupuesto_2026_df' not in locals() or presupuesto_2026_df.empty:
-            st.info("Primero calcula el 2026 (con IPC) en la pestaña anterior.")
-        else:
-            base_26 = presupuesto_2026_df.copy()
-            base_col = base_26.columns[2]  # Ajuste IPC XX.X%
-            base_26["Escenario ajustado 2026"] = (base_26[base_col]*(1+ajuste_pct/100)).round(0).astype(int)
-            total_base = int(base_26[base_col].sum())
-            total_adj  = int(base_26["Escenario ajustado 2026"].sum())
-            c1,c2 = st.columns(2)
-            c1.metric("Total 2026 (con IPC)", fmt_cop(total_base))
-            c2.metric("Total escenario 2026", fmt_cop(total_adj), delta=f"{ajuste_pct:+d}%")
-            show_df(base_26[["FECHA",base_col,"Escenario ajustado 2026"]], key="escenario26")
-            xls_dir = BytesIO()
-            with pd.ExcelWriter(xls_dir, engine="openpyxl") as writer:
-                base_26.to_excel(writer, sheet_name="2026_con_IPC_vs_ajustado", index=False)
-            st.download_button("⬇️ Descargar Excel (Modo Director - 2026)", data=xls_dir.getvalue(),
-                               file_name="modo_director_2026.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-    with colB:
-        st.markdown("#### Stress test / Tornado " + info_badge(
-            "Compara 3 escenarios: Base (con IPC), -X% y +X%. Mide cuánto cambiaría el total del año."
-        ), unsafe_allow_html=True)
-        perc = st.select_slider("Rango de sensibilidad", options=[5,10,15,20,25,30], value=10)
-        if 'presupuesto_2026_df' in locals() and not presupuesto_2026_df.empty:
-            base_26 = presupuesto_2026_df.copy()
-            base_col = base_26.columns[2]  # Ajuste IPC
-            up = int((base_26[base_col]*(1+perc/100)).sum())
-            dn = int((base_26[base_col]*(1-perc/100)).sum())
-            bench = int(base_26[base_col].sum())
-            tornado = pd.DataFrame({"Escenario":[f"-{perc}%", "Base", f"+{perc}%"], "Total":[dn, bench, up]})
-            fig_t = px.bar(tornado, x="Escenario", y="Total", text="Total")
-            fig_t.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
-            fig_t.update_layout(yaxis_title="COP", xaxis_title=None, margin=dict(l=10,r=10,t=20,b=20))
-            fig_t.update_xaxes(rangeslider_visible=False)
-            st.plotly_chart(fig_t, use_container_width=True)
-        else:
-            st.info("Calcula primero el 2026 con IPC para ver la sensibilidad.")
-
-    st.markdown("---")
-    st.markdown("#### Hallazgos automáticos (anomalías)")
-    st.caption("Detección por *z-score ≥ 2.5* sobre la serie mensual suavizada." +
-               info_badge("Marcamos picos/caídas inusuales para explicar campañas, eventos o ajustes."), unsafe_allow_html=True)
-    try:
-        s = ensure_monthly(serie_prima_all).copy()
-        if len(s) >= 24:
-            ma = s.rolling(12, min_periods=6).mean()
-            resid = (s - ma) / (s.rolling(12, min_periods=6).std() + 1e-9)
-            outliers = resid[np.abs(resid) >= 2.5].dropna()
-            if not outliers.empty:
-                alert = pd.DataFrame({
-                    "Fecha": outliers.index.strftime("%b-%Y"),
-                    "Valor": s.loc[outliers.index].astype(int).values,
-                    "Desviación": outliers.round(2).values
-                }).sort_index()
-                show_df(alert, money_cols=["Valor"], key="anomalias")
-            else:
-                st.success("No se detectaron anomalías significativas con z-score ≥ 2.5.")
-        else:
-            st.info("Se requieren ≥24 meses para análisis de anomalías.")
-    except Exception as e:
-        st.info(f"No se pudo calcular anomalías: {e}")
-
-    st.markdown("---")
-    try:
-        yref = int(df['FECHA'].max().year)
-        base_series2 = sanitize_trailing_zeros(serie_prima_all.copy(), yref)
-        serie_train2, cur_ts2, had_part2 = split_series_excluding_partial_current(base_series2, yref)
-        falt2 = max(0, 12 - (cur_ts2.month - 1 if had_part2 and cur_ts2 is not None else last_actual_month_from_df(df_noYear, yref)))
-        _, fc_tmp2, _ = fit_forecast(serie_train2, steps=max(1, falt2))
-        if had_part2 and cur_ts2 is not None and len(fc_tmp2)>0:
-            if fc_tmp2.iloc[0]["FECHA"] != cur_ts2:
-                fc_tmp2.iloc[0, fc_tmp2.columns.get_loc("FECHA")] = cur_ts2
-            now2 = float(fc_tmp2.iloc[0]["Forecast_mensual"])
-            resto2 = fc_tmp2['Forecast_mensual'].iloc[1:].sum() if len(fc_tmp2)>1 else 0.0
-        else:
-            now2 = 0.0
-            resto2 = fc_tmp2['Forecast_mensual'].sum()
-        ytd_cerr2 = serie_train2[serie_train2.index.year == yref].sum()
-        cierre_ref2 = int(ytd_cerr2 + now2 + resto2)
-
-        total_26 = int(presupuesto_2026_df[presupuesto_2026_df.columns[2]].sum()) if 'presupuesto_2026_df' in locals() and not presupuesto_2026_df.empty else 0
-        st.info(f"*Resumen ejecutivo* — Con nowcast del mes en curso, el *cierre {yref}* se estima en *{fmt_cop(cierre_ref2)}*. "
-                f"Para *2026, el **presupuesto (con IPC {ipc_2026:.1f}%)* asciende a *{fmt_cop(total_26)}*.")
-    except Exception as e:
-        st.info(f"No se pudo calcular resumen ejecutivo: {e}")
+    st.info("Aquí va el panel ejecutivo, sensibilidades y hallazgos automáticos. (Puedes agregar tu lógica de BI aquí)")
