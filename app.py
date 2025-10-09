@@ -5,7 +5,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-from plotly.graph_objs import Figure
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.arima.model import ARIMA
 from io import BytesIO
@@ -16,7 +15,6 @@ st.set_page_config(
     layout="wide",
     page_icon=":bar_chart:"
 )
-
 # Tema base + estilos y tooltips sin JS
 st.markdown("""
 <style>
@@ -60,9 +58,8 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 st.title("AseguraView · Primas & Presupuesto")
-st.caption("Forecast mensual (SARIMAX), nowcast del mes en curso, cierre estimado 2025 y presupuesto sugerido 2026 (con IPC), por Sucursal / Línea / Compañía.")
+st.caption("Forecast mensual (SARIMAX), nowcast del mes en curso, cierre estimado y presupuesto sugerido 2026 (con IPC), por Sucursal / Línea / Compañía.")
 
-# ============ DATOS ============
 SHEET_ID = "1ThVwW3IbkL7Dw_Vrs9heT1QMiHDZw1Aj-n0XNbDi9i8"
 SHEET_NAME_DATOS = "Hoja1"
 
@@ -245,10 +242,8 @@ if serie_prima_all.empty:
     st.warning("No hay datos de IMP_PRIMA con los filtros seleccionados."); st.stop()
 ultimo_anio_datos = int(df['FECHA'].max().year)
 
-# ============ TABS ============
 tabs = st.tabs(["🏠 Presentación", "📈 Primas (forecast & cierre)", "🧭 Presupuesto 2026", "🧠 Modo Director BI"])
 
-# --------- TAB PRESENTACIÓN ---------
 with tabs[0]:
     st.markdown("## Bienvenido a *AseguraView*")
     st.markdown("""
@@ -269,10 +264,8 @@ with tabs[0]:
     </div>
     """.format(ipc=ipc_2026), unsafe_allow_html=True)
 
-# --------- TAB PRIMAS (forecast & cierre) ---------
 with tabs[1]:
     ref_year = int(df['FECHA'].max().year)
-
     base_series = sanitize_trailing_zeros(serie_prima_all.copy(), ref_year)
     serie_train, cur_month_ts, had_partial = split_series_excluding_partial_current(base_series, ref_year)
     if had_partial and cur_month_ts is not None:
@@ -281,7 +274,6 @@ with tabs[1]:
         last_closed_month = last_actual_month_from_df(df_noYear, ref_year)
     meses_diciembre = pd.date_range(f"{ref_year}-01-01", f"{ref_year}-12-01", freq="MS")
     meses_faltantes = max(0, 12 - last_closed_month)
-
     hist_df, fc_df, smape6 = fit_forecast(serie_train, steps=max(1, meses_faltantes), eval_months=6)
 
     nowcast_actual = None
@@ -386,15 +378,12 @@ with tabs[1]:
                         annotation_position="top left")
     st.plotly_chart(fig_a, use_container_width=True)
 
-# --------- TAB PRESUPUESTO 2026 ---------
 with tabs[2]:
     st.subheader("Ejecución vs Presupuesto año actual y Presupuesto sugerido 2026")
     st.caption(f"Nota: el presupuesto 2026 aplica un ajuste automático de *IPC proyectado {ipc_2026:.1f}%*.")
 
     ref_year = int(df['FECHA'].max().year)
     pres_ref = serie_presu_all[serie_presu_all.index.year == ref_year]
-
-    # Forecast para presupuesto
     serie_exec_clean0 = sanitize_trailing_zeros(serie_prima_all, ref_year)
     serie_exec_clean, cur_m_ref, had_partial_ref = split_series_excluding_partial_current(serie_exec_clean0, ref_year)
     if had_partial_ref and cur_m_ref is not None:
@@ -403,8 +392,6 @@ with tabs[2]:
         last_closed_month_ref = last_actual_month_from_df(df_noYear, ref_year)
     meses_falt_ref = max(0, 12 - last_closed_month_ref)
     _, fc_ref, _ = fit_forecast(serie_exec_clean, steps=max(1, meses_falt_ref))
-
-    # Proyección 2026 (forecast de 12 meses)
     pasos_total = max(1, meses_falt_ref) + 12
     _, fc_ext, _ = fit_forecast(serie_exec_clean, steps=pasos_total, eval_months=6)
     sug_2026 = fc_ext.tail(12).set_index("FECHA"); sug_2026.index = pd.date_range("2026-01-01","2026-12-01",freq="MS")
@@ -412,7 +399,6 @@ with tabs[2]:
     base_2026 = sug_2026["Forecast_mensual"].round(0).astype(int)
     ipc_factor = 1 + (ipc_2026/100.0)
     ajustado_2026 = (base_2026 * ipc_factor).round(0).astype(int)
-
     presupuesto_2026_df = pd.DataFrame({
         "FECHA": base_2026.index,
         "Sugerido modelo 2026": base_2026.values,
@@ -441,12 +427,14 @@ with tabs[2]:
     st.markdown("##### Proyección mensual 2026 por Línea " + info_badge("Proyección de cada línea para 2026."), unsafe_allow_html=True)
     show_df(df_lineas_tabla_2026, money_cols=lineas, key="tabla_linea_2026")
 
-    xls_pres = to_excel_bytes({"Presupuesto 2026": presupuesto_2026_df, "Proyección líneas 2026": df_lineas_tabla_2026})
-    st.download_button("⬇️ Descargar Excel (PRESUPUESTO)", data=xls_pres,
+    xls_pres = BytesIO()
+    with pd.ExcelWriter(xls_pres, engine="openpyxl") as writer:
+        presupuesto_2026_df.to_excel(writer, sheet_name="Presupuesto 2026", index=False)
+        df_lineas_tabla_2026.to_excel(writer, sheet_name="Proyección líneas 2026", index=False)
+    st.download_button("⬇️ Descargar Excel (PRESUPUESTO)", data=xls_pres.getvalue(),
                        file_name="presupuesto_2026_ipc.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-# --------- TAB MODO DIRECTOR BI ---------
 with tabs[3]:
     st.subheader("Panel Ejecutivo · Sensibilidades & Hallazgos")
     colA,colB = st.columns([1,1])
@@ -468,8 +456,10 @@ with tabs[3]:
             c1.metric("Total 2026 (con IPC)", fmt_cop(total_base))
             c2.metric("Total escenario 2026", fmt_cop(total_adj), delta=f"{ajuste_pct:+d}%")
             show_df(base_26[["FECHA",base_col,"Escenario ajustado 2026"]], key="escenario26")
-            xls_dir = to_excel_bytes({"2026_con_IPC_vs_ajustado": base_26.assign(FECHA=base_26["FECHA"].dt.strftime("%Y-%m"))})
-            st.download_button("⬇️ Descargar Excel (Modo Director - 2026)", data=xls_dir,
+            xls_dir = BytesIO()
+            with pd.ExcelWriter(xls_dir, engine="openpyxl") as writer:
+                base_26.to_excel(writer, sheet_name="2026_con_IPC_vs_ajustado", index=False)
+            st.download_button("⬇️ Descargar Excel (Modo Director - 2026)", data=xls_dir.getvalue(),
                                file_name="modo_director_2026.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
@@ -523,4 +513,20 @@ with tabs[3]:
         base_series2 = sanitize_trailing_zeros(serie_prima_all.copy(), yref)
         serie_train2, cur_ts2, had_part2 = split_series_excluding_partial_current(base_series2, yref)
         falt2 = max(0, 12 - (cur_ts2.month - 1 if had_part2 and cur_ts2 is not None else last_actual_month_from_df(df_noYear, yref)))
-        _,
+        _, fc_tmp2, _ = fit_forecast(serie_train2, steps=max(1, falt2))
+        if had_part2 and cur_ts2 is not None and len(fc_tmp2)>0:
+            if fc_tmp2.iloc[0]["FECHA"] != cur_ts2:
+                fc_tmp2.iloc[0, fc_tmp2.columns.get_loc("FECHA")] = cur_ts2
+            now2 = float(fc_tmp2.iloc[0]["Forecast_mensual"])
+            resto2 = fc_tmp2['Forecast_mensual'].iloc[1:].sum() if len(fc_tmp2)>1 else 0.0
+        else:
+            now2 = 0.0
+            resto2 = fc_tmp2['Forecast_mensual'].sum()
+        ytd_cerr2 = serie_train2[serie_train2.index.year == yref].sum()
+        cierre_ref2 = int(ytd_cerr2 + now2 + resto2)
+
+        total_26 = int(presupuesto_2026_df[presupuesto_2026_df.columns[2]].sum()) if 'presupuesto_2026_df' in locals() and not presupuesto_2026_df.empty else 0
+        st.info(f"*Resumen ejecutivo* — Con nowcast del mes en curso, el *cierre {yref}* se estima en *{fmt_cop(cierre_ref2)}*. "
+                f"Para *2026, el **presupuesto (con IPC {ipc_2026:.1f}%)* asciende a *{fmt_cop(total_26)}*.")
+    except Exception as e:
+        st.info(f"No se pudo calcular resumen ejecutivo: {e}")
